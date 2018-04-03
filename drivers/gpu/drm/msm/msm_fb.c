@@ -35,6 +35,7 @@ static struct drm_framebuffer *msm_framebuffer_init(struct drm_device *dev,
 static const struct drm_framebuffer_funcs msm_framebuffer_funcs = {
 	.create_handle = drm_gem_fb_create_handle,
 	.destroy = drm_gem_fb_destroy,
+	.dirty = drm_atomic_helper_dirtyfb,
 };
 
 #ifdef CONFIG_DEBUG_FS
