@@ -3108,6 +3108,35 @@ static const struct panel_desc arm_rtsm = {
 	.bus_format = MEDIA_BUS_FMT_RGB888_1X24,
 };
 
+
+static const struct drm_display_mode s6e3fa2_mode = {
+	.clock = 149769,
+	.hdisplay = 1080,
+	.hsync_start = 1080 + 162,
+	.hsync_end = 1080 + 162 + 10,
+	.htotal = 1080 + 162 + 10 + 36,
+	.vdisplay = 1920,
+	.vsync_start = 1920 + 13,
+	.vsync_end = 1920 + 13 + 2,
+	.vtotal = 1920 + 13 + 2 + 3,
+	.vrefresh = 60,
+};
+
+static const struct panel_desc_dsi sm_s6e3fa2  = {
+	.desc = {
+		.modes = &s6e3fa2_mode,
+		.num_modes = 1,
+		.bpc = 8,
+		.size = {
+			.width = 65,
+			.height = 115,
+		},
+	},
+	.flags = 0,
+	.format = MIPI_DSI_FMT_RGB888,
+	.lanes = 4,
+};
+
 static const struct of_device_id platform_of_match[] = {
 	{
 		.compatible = "ampire,am-480272h3tmqw-t01h",
@@ -3436,6 +3465,9 @@ static const struct of_device_id platform_of_match[] = {
 	}, {
 		.compatible = "winstar,wf35ltiacd",
 		.data = &winstar_wf35ltiacd,
+	}, {
+		.compatible = "sm,s6e3fa2",
+		.data = &sm_s6e3fa2
 	}, {
 		/* sentinel */
 	}
