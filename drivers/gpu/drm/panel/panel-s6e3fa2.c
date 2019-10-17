@@ -44,11 +44,11 @@ static inline struct mdss_dsi_samsung_1080p_cmd_fa2 *to_mdss_dsi_samsung_1080p_c
 static void mdss_dsi_samsung_1080p_cmd_fa2_reset(struct mdss_dsi_samsung_1080p_cmd_fa2 *ctx)
 {
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-	usleep_range(5000, 6000);
+	msleep(5);
 	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-	usleep_range(5000, 6000);
+	msleep(5);
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-	usleep_range(7000, 8000);
+	msleep(7);
 }
 
 static int mdss_dsi_samsung_1080p_cmd_fa2_on(struct mdss_dsi_samsung_1080p_cmd_fa2 *ctx)
@@ -63,7 +63,7 @@ static int mdss_dsi_samsung_1080p_cmd_fa2_on(struct mdss_dsi_samsung_1080p_cmd_f
 	dsi_generic_write_seq(dsi, 0xfc, 0x5a, 0x5a);
 	dsi_dcs_write_seq(dsi, 0xf2);
 	dsi_dcs_write_seq(dsi, 0xf9);
-	usleep_range(5000, 6000);
+	msleep(5);
 
 	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
 	if (ret < 0) {
@@ -111,7 +111,7 @@ static int mdss_dsi_samsung_1080p_cmd_fa2_off(struct mdss_dsi_samsung_1080p_cmd_
 		dev_err(dev, "Failed to set display off: %d\n", ret);
 		return ret;
 	}
-	usleep_range(10000, 11000);
+	msleep(10);
 
 	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
 	if (ret < 0) {
