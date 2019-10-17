@@ -9,12 +9,12 @@
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/regulator/consumer.h>
 
 struct mdss_dsi_samsung_1080p_cmd_fa2 {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
 	struct backlight_device *backlight;
+	struct gpio_desc *reset_gpio;
 
 	bool prepared;
 	bool enabled;
@@ -40,6 +40,16 @@ static inline struct mdss_dsi_samsung_1080p_cmd_fa2 *to_mdss_dsi_samsung_1080p_c
 		if (ret < 0)						\
 			return ret;					\
 	} while (0)
+
+static void mdss_dsi_samsung_1080p_cmd_fa2_reset(struct mdss_dsi_samsung_1080p_cmd_fa2 *ctx)
+{
+	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	usleep_range(5000, 6000);
+	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+	usleep_range(5000, 6000);
+	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	usleep_range(7000, 8000);
+}
 
 static int mdss_dsi_samsung_1080p_cmd_fa2_on(struct mdss_dsi_samsung_1080p_cmd_fa2 *ctx)
 {
@@ -122,9 +132,12 @@ static int mdss_dsi_samsung_1080p_cmd_fa2_prepare(struct drm_panel *panel)
 	if (ctx->prepared)
 		return 0;
 
+	mdss_dsi_samsung_1080p_cmd_fa2_reset(ctx);
+
 	ret = mdss_dsi_samsung_1080p_cmd_fa2_on(ctx);
 	if (ret < 0) {
 		dev_err(dev, "Failed to initialize panel: %d\n", ret);
+		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
 		return ret;
 	}
 
@@ -145,6 +158,7 @@ static int mdss_dsi_samsung_1080p_cmd_fa2_unprepare(struct drm_panel *panel)
 	if (ret < 0)
 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
 
+	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
 
 	ctx->prepared = false;
 	return 0;
@@ -236,6 +250,13 @@ static int mdss_dsi_samsung_1080p_cmd_fa2_probe(struct mipi_dsi_device *dsi)
 	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
+
+	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
+	if (IS_ERR(ctx->reset_gpio)) {
+		ret = PTR_ERR(ctx->reset_gpio);
+		dev_err(dev, "Failed to get reset-gpios: %d\n", ret);
+		return ret;
+	}
 
 	ctx->backlight = devm_of_find_backlight(dev);
 	if (IS_ERR(ctx->backlight)) {
