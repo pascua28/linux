@@ -342,7 +342,7 @@
 
 			panel: panel@0 {
 				reg = <0>;
-				compatible = "sm,s6e3fa2";
+				compatible = "samsung,s6e3fa2";
 
 				pinctrl-names = "default";
 				pinctrl-0 = <&panel_pin>;
