@@ -487,10 +487,7 @@ static int msm_drm_init(struct device *dev, struct drm_driver *drv)
 
 	ret = msm_init_vram(ddev);
 	if (ret) {
-		msm_mdss_destroy(ddev);
-		kfree(priv);
-		drm_dev_unref(ddev);
-		return ret;
+		goto err_msm_uninit;
 	}
 
 	/* Bind all our sub-components: */
