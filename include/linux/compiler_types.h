@@ -187,6 +187,10 @@ struct ftrace_likely_data {
 #define asm_volatile_goto(x...) asm goto(x)
 #endif
 
+#ifndef __no_fgcse
+# define __no_fgcse
+#endif
+
 /* Are two types/vars the same type (ignoring qualifiers)? */
 #define __same_type(a, b) __builtin_types_compatible_p(typeof(a), typeof(b))
 
@@ -213,5 +217,13 @@ struct ftrace_likely_data {
 	__diag_ ## compiler(version, warn, option)
 #define __diag_error(compiler, version, option, comment) \
 	__diag_ ## compiler(version, error, option)
+
+#ifndef __norecordmcount
+#define __norecordmcount
+#endif
+
+#ifndef __nocfi
+#define __nocfi
+#endif
 
 #endif /* __LINUX_COMPILER_TYPES_H */

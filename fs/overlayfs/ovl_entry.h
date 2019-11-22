@@ -17,6 +17,7 @@ struct ovl_config {
 	bool nfs_export;
 	int xino;
 	bool metacopy;
+	bool override_creds;
 };
 
 struct ovl_sb {
@@ -66,6 +67,7 @@ struct ovl_fs {
 	bool workdir_locked;
 	/* Traps in ovl inode cache */
 	struct inode *upperdir_trap;
+	struct inode *workbasedir_trap;
 	struct inode *workdir_trap;
 	struct inode *indexdir_trap;
 	/* Inode numbers in all layers do not use the high xino_bits */
