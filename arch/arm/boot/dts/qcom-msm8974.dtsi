@@ -1143,11 +1143,6 @@
 			power-domains = <&mmcc OXILICX_GDSC>;
 			operating-points-v2 = <&gpu_opp_table>;
 
-			interconnects = <&mmssnoc MNOC_MAS_GRAPHICS_3D &bimc BIMC_SLV_EBI_CH0>,
-			                <&ocmemnoc OCMEM_VNOC_MAS_GFX3D &ocmemnoc OCMEM_SLV_OCMEM>;
-			interconnect-names = "gfx-mem",
-			                     "ocmem";
-
 			// iommus = <&gpu_iommu 0>;
 		};
 
