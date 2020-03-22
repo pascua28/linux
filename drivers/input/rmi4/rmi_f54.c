@@ -33,6 +33,10 @@
 #define F54_CAP_IMAGE8		(1 << 3)
 #define F54_CAP_IMAGE16		(1 << 6)
 
+#define HIGH_RESISTANCE_DATA_SIZE 6
+#define FULL_RAW_CAP_MIN_MAX_DATA_SIZE 4
+#define TREX_DATA_SIZE 7
+
 /**
  * enum rmi_f54_report_type - RMI4 F54 report types
  *
@@ -64,9 +68,26 @@ enum rmi_f54_report_type {
 	F54_8BIT_IMAGE = 1,
 	F54_16BIT_IMAGE = 2,
 	F54_RAW_16BIT_IMAGE = 3,
+	F54_HIGH_RESISTANCE = 4,
+	F54_TX_TO_TX_SHORT = 5,
+	F54_RX_TO_RX1 = 7,
 	F54_TRUE_BASELINE = 9,
+	F54_FULL_RAW_CAP_MIN_MAX = 13,
+	F54_RX_OPENS1 = 14,
+	F54_TX_OPEN = 15,
+	F54_TX_TO_GROUND = 16,
+	F54_RX_TO_RX2 = 17,
+	F54_RX_OPENS2 = 18,
 	F54_FULL_RAW_CAP = 19,
 	F54_FULL_RAW_CAP_RX_OFFSET_REMOVED = 20,
+	F54_SENSOR_SPEED = 22,
+	F54_ADC_RANGE = 23,
+	F54_TREX_OPENS = 24,
+	F54_TREX_TO_GND = 25,
+	F54_TREX_SHORTS = 26,
+	F54_ABS_CAP = 38,
+	F54_ABS_DELTA = 40,
+	F54_ABS_ADC = 42,
 	F54_MAX_REPORT_TYPE,
 };
 
@@ -76,9 +97,23 @@ static const char * const rmi_f54_report_type_names[] = {
 	[F54_16BIT_IMAGE]		= "Normalized 16-Bit Image",
 	[F54_RAW_16BIT_IMAGE]		= "Raw 16-Bit Image",
 	[F54_TRUE_BASELINE]		= "True Baseline",
+	[F54_FULL_RAW_CAP_MIN_MAX] = "N/A",
+	[F54_RX_OPENS1] = "N/A",
+	[F54_TX_OPEN] = "N/A",
+	[F54_TX_TO_GROUND] = "N/A",
+	[F54_RX_TO_RX2] = "N/A",
+	[F54_RX_OPENS2] = "N/A",
 	[F54_FULL_RAW_CAP]		= "Full Raw Capacitance",
 	[F54_FULL_RAW_CAP_RX_OFFSET_REMOVED]
 					= "Full Raw Capacitance RX Offset Removed",
+	[F54_SENSOR_SPEED] = "N/A",
+	[F54_ADC_RANGE] = "N/A",
+	[F54_TREX_OPENS] = "N/A",
+	[F54_TREX_TO_GND] = "N/A",
+	[F54_TREX_SHORTS] = "N/A",
+	[F54_ABS_CAP] = "N/A",
+	[F54_ABS_DELTA] = "N/A",
+	[F54_ABS_ADC] = "N/A",
 };
 
 struct rmi_f54_reports {
@@ -129,14 +164,28 @@ static bool is_f54_report_type_valid(struct f54_data *f54,
 {
 	switch (reptype) {
 	case F54_8BIT_IMAGE:
-		return f54->capabilities & F54_CAP_IMAGE8;
 	case F54_16BIT_IMAGE:
 	case F54_RAW_16BIT_IMAGE:
-		return f54->capabilities & F54_CAP_IMAGE16;
+	case F54_HIGH_RESISTANCE:
+	case F54_TX_TO_TX_SHORT:
+	case F54_RX_TO_RX1:
 	case F54_TRUE_BASELINE:
-		return f54->capabilities & F54_CAP_IMAGE16;
+	case F54_FULL_RAW_CAP_MIN_MAX:
+	case F54_RX_OPENS1:
+	case F54_TX_OPEN:
+	case F54_TX_TO_GROUND:
+	case F54_RX_TO_RX2:
+	case F54_RX_OPENS2:
 	case F54_FULL_RAW_CAP:
 	case F54_FULL_RAW_CAP_RX_OFFSET_REMOVED:
+	case F54_SENSOR_SPEED:
+	case F54_ADC_RANGE:
+	case F54_TREX_OPENS:
+	case F54_TREX_TO_GND:
+	case F54_TREX_SHORTS:
+	case F54_ABS_CAP:
+	case F54_ABS_DELTA:
+	case F54_ABS_ADC:
 		return true;
 	default:
 		return false;
@@ -226,6 +275,44 @@ static size_t rmi_f54_get_report_size(struct f54_data *f54)
 	case F54_FULL_RAW_CAP:
 	case F54_FULL_RAW_CAP_RX_OFFSET_REMOVED:
 		size = sizeof(u16) * rx * tx;
+	case F54_SENSOR_SPEED:
+        	size = 2 * rx * tx;
+        	break;
+	case F54_HIGH_RESISTANCE:
+        	size = HIGH_RESISTANCE_DATA_SIZE;
+        	break;
+	case F54_TX_TO_TX_SHORT:
+	case F54_TX_OPEN:
+	case F54_TX_TO_GROUND:
+	    size = (tx + 7) / 8;
+		break;
+	case F54_RX_OPENS1:
+		if (rx < tx)
+			size = 2 * rx * rx;
+		else
+			size = 2 * rx * tx;
+		break;
+	case F54_FULL_RAW_CAP_MIN_MAX:
+		size = FULL_RAW_CAP_MIN_MAX_DATA_SIZE;
+		break;
+	case F54_RX_TO_RX2:
+	case F54_RX_OPENS2:
+		if (rx <= tx)
+			size = 0;
+		else
+			size = 2 * rx * (rx - tx);
+		break;
+	case F54_TREX_OPENS:
+	case F54_TREX_TO_GND:
+	case F54_TREX_SHORTS:
+		size = TREX_DATA_SIZE;
+		break;
+	case F54_ABS_CAP:
+	case F54_ABS_DELTA:
+		size = 4 * (rx + tx);
+		break;
+	case F54_ABS_ADC:
+		size = 2 * (rx + tx);
 		break;
 	default:
 		size = 0;
