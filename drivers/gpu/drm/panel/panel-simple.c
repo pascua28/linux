@@ -3706,7 +3706,7 @@ static const struct panel_desc_dsi sm_s6e3fa2  = {
 			.height = 115,
 		},
 	},
-	.flags = 0,
+	.flags = MIPI_DSI_MODE_VIDEO_BURST,
 	.format = MIPI_DSI_FMT_RGB888,
 	.lanes = 4,
 };
