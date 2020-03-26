@@ -323,7 +323,7 @@
 			status = "ok";
 
 			vdda-supply = <&pm8941_l2>;
-			vdd-supply = <&pm8941_lvs3>;
+			vdd-supply = <&pm8941_l22>;
 			vddio-supply = <&pm8941_l12>;
 
 			#address-cells = <1>;
@@ -340,7 +340,7 @@
 
 			panel: panel@0 {
 				reg = <0>;
-				compatible = "samsung,s6e3fa2";
+				compatible = "sm,s6e3fa2";
 
 				pinctrl-names = "default";
 				pinctrl-0 = <&panel_pin>;
