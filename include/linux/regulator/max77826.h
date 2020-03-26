@@ -117,5 +117,4 @@ struct max77826_platform_data {
 	int num_regulators;
 	struct max77826_regulator_subdev *regulators;
 };
-#endif	/* __LINUX_REGULATOR_MAX77826_H */
-
+#endif	/* __LINUX_REGULATOR_MAX77826_H */ 
