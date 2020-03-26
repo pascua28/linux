@@ -384,6 +384,147 @@ static int max77826_ldo_set_voltage(struct regulator_dev *rdev,
 	return ret;
 }
 
+#define MAX77826_I2C_BUS_ID	16
+
+#define MAX77826_VREG_CONSUMERS(_id) \
+	static struct regulator_consumer_supply max77826_vreg_consumers_##_id[]
+
+#define MAX77826_VREG_INIT(_id, _min_uV, _max_uV, _always_on) \
+	static struct regulator_init_data max77826_##_id##_init_data = { \
+		.constraints = { \
+			.min_uV			= _min_uV, \
+			.max_uV			= _max_uV, \
+			.apply_uV		= 1, \
+			.always_on		= _always_on, \
+			.valid_modes_mask = REGULATOR_MODE_NORMAL, \
+			.valid_ops_mask = REGULATOR_CHANGE_VOLTAGE | \
+							REGULATOR_CHANGE_STATUS, \
+		}, \
+		.num_consumer_supplies = ARRAY_SIZE(max77826_vreg_consumers_##_id), \
+		.consumer_supplies = max77826_vreg_consumers_##_id, \
+	}
+
+#define MAX77826_VREG_INIT_DATA(_id) \
+	(struct regulator_init_data *)&max77826_##_id##_init_data
+
+MAX77826_VREG_CONSUMERS(LDO1) = {
+	REGULATOR_SUPPLY("max77826_ldo1",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO2) = {
+	REGULATOR_SUPPLY("max77826_ldo2",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO3) = {
+	REGULATOR_SUPPLY("max77826_ldo3",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO4) = {
+	REGULATOR_SUPPLY("max77826_ldo4",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO5) = {
+	REGULATOR_SUPPLY("max77826_ldo5",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO6) = {
+	REGULATOR_SUPPLY("max77826_ldo6",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO7) = {
+	REGULATOR_SUPPLY("max77826_ldo7",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO8) = {
+	REGULATOR_SUPPLY("max77826_ldo8",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO9) = {
+	REGULATOR_SUPPLY("max77826_ldo9",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO10) = {
+	REGULATOR_SUPPLY("max77826_ldo10",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO11) = {
+	REGULATOR_SUPPLY("max77826_ldo11",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO12) = {
+	REGULATOR_SUPPLY("max77826_ldo12",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO13) = {
+	REGULATOR_SUPPLY("max77826_ldo13",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO14) = {
+	REGULATOR_SUPPLY("max77826_ldo14",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(LDO15) = {
+	REGULATOR_SUPPLY("max77826_ldo15",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(BUCK1) = {
+	REGULATOR_SUPPLY("max77826_buck1",	NULL),
+};
+
+MAX77826_VREG_CONSUMERS(BUCK2) = {
+	REGULATOR_SUPPLY("max77826_buck2",	NULL),
+};
+MAX77826_VREG_INIT(LDO1, 1200000, 1200000, 0);
+MAX77826_VREG_INIT(LDO2, 1000000, 1000000, 0);
+MAX77826_VREG_INIT(LDO3, 1200000, 1200000, 0);
+MAX77826_VREG_INIT(LDO4, 1800000, 1800000, 0);
+MAX77826_VREG_INIT(LDO5, 1800000, 1800000, 0);
+MAX77826_VREG_INIT(LDO6, 1800000, 3300000, 0);
+MAX77826_VREG_INIT(LDO7, 1800000, 1800000, 0);
+MAX77826_VREG_INIT(LDO8, 1800000, 3300000, 0);
+MAX77826_VREG_INIT(LDO9, 1800000, 1800000, 0);
+MAX77826_VREG_INIT(LDO10, 2800000, 2950000, 0);
+MAX77826_VREG_INIT(LDO11, 2700000, 2950000, 0);
+MAX77826_VREG_INIT(LDO12, 2500000, 3300000, 0);
+MAX77826_VREG_INIT(LDO13, 3300000, 3300000, 0);
+MAX77826_VREG_INIT(LDO14, 3300000, 3300000, 0);
+MAX77826_VREG_INIT(LDO15, 1800000, 3300000, 0);
+MAX77826_VREG_INIT(BUCK1, 1225000, 1225000, 0);
+MAX77826_VREG_INIT(BUCK2, 3400000, 3400000, 0);
+
+static struct max77826_regulator_subdev max77826_regulators[] = {
+	{MAX77826_LDO1, MAX77826_VREG_INIT_DATA(LDO1)},
+	{MAX77826_LDO2, MAX77826_VREG_INIT_DATA(LDO2)},
+	{MAX77826_LDO3, MAX77826_VREG_INIT_DATA(LDO3)},
+	{MAX77826_LDO4, MAX77826_VREG_INIT_DATA(LDO4)},
+	{MAX77826_LDO5, MAX77826_VREG_INIT_DATA(LDO5)},
+	{MAX77826_LDO6, MAX77826_VREG_INIT_DATA(LDO6)},
+	{MAX77826_LDO7, MAX77826_VREG_INIT_DATA(LDO7)},
+	{MAX77826_LDO8, MAX77826_VREG_INIT_DATA(LDO8)},
+	{MAX77826_LDO9, MAX77826_VREG_INIT_DATA(LDO9)},
+	{MAX77826_LDO10, MAX77826_VREG_INIT_DATA(LDO10)},
+	{MAX77826_LDO11, MAX77826_VREG_INIT_DATA(LDO11)},
+	{MAX77826_LDO12, MAX77826_VREG_INIT_DATA(LDO12)},
+	{MAX77826_LDO13, MAX77826_VREG_INIT_DATA(LDO13)},
+	{MAX77826_LDO14, MAX77826_VREG_INIT_DATA(LDO14)},
+	{MAX77826_LDO15, MAX77826_VREG_INIT_DATA(LDO15)},
+	{MAX77826_BUCK1, MAX77826_VREG_INIT_DATA(BUCK1)},
+	{MAX77826_BUCK2, MAX77826_VREG_INIT_DATA(BUCK2)},
+};
+
+static struct max77826_platform_data max77826_pmic_pdata = {
+	.name = "max77826",
+	.num_regulators = ARRAY_SIZE(max77826_regulators),
+	.regulators = max77826_regulators,
+};
+
+static struct i2c_board_info max77826_pmic_info[] __initdata = {
+	{
+		I2C_BOARD_INFO("max77826", 0x60),
+		.platform_data = &max77826_pmic_pdata,
+	},
+};
+
 static struct regulator_ops max77826_ldo_ops = {
 	.is_enabled = max77826_ldo_is_enabled,
 	.enable = max77826_ldo_enable,
@@ -598,10 +739,17 @@ static struct i2c_driver max77826_i2c_driver = {
 static int __init max77826_module_init(void)
 {
 	pr_info("%s\n", __func__);
-
 	return i2c_add_driver(&max77826_i2c_driver);
 }
 subsys_initcall(max77826_module_init);
+
+static int __init max77826_i2c_init(void)
+{
+	i2c_register_board_info(MAX77826_I2C_BUS_ID, max77826_pmic_info,
+		ARRAY_SIZE(max77826_pmic_info));
+	return 0;
+}
+device_initcall(max77826_i2c_init);
 
 static void __exit max77826_module_exit(void)
 {
