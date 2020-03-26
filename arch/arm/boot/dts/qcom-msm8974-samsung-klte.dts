@@ -251,6 +251,16 @@
 			};
 		};
 
+		i2c2_pins: i2c2 {
+			mux {
+				pins = "gpio6", "gpio7";
+				function = "blsp_i2c2";
+
+				drive-strength = <2>;
+				bias-disable;
+			};
+		};
+
 		panel_pin: panel {
 			te {
 				pins = "gpio12";
@@ -258,6 +268,17 @@
 
 				drive-strength = <2>;
 				bias-disable;
+			};
+		};
+
+		touch_pin: touch {
+			int {
+				pins = "gpio8";
+				function = "gpio";
+
+				drive-strength = <2>;
+				bias-disable;
+				input-enable;
 			};
 		};
 	};
@@ -273,6 +294,45 @@
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&sdhc1_pin_a>;
+	};
+
+	i2c@f9924000 {
+		status = "ok";
+
+		clock-frequency = <400000>;
+		qcom,src-freq = <50000000>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c2_pins>;
+
+		synaptics@20 {
+			compatible = "syna,rmi4-i2c";
+			reg = <0x20>;
+
+			interrupts-extended = <&pma8084_gpios 8 0>;
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			vdd-supply = <&pma8084_l22>;
+			vio-supply = <&pma8084_lvs2>;
+
+			pinctrl-names = "default";
+			pinctrl-0 = <&touch_pin>;
+
+			syna,nosleep-mode = <2>;
+			syna,startup-delay-ms = <160>;
+
+			rmi4-f01@1 {
+				reg = <0x1>;
+				syna,nosleep-mode = <1>;
+			};
+
+			rmi4-f54@54 {
+				reg = <0x54>;
+				syna,sensor-type = <1>;
+			};
+		};
 	};
 
 	usb@f9a55000 {
