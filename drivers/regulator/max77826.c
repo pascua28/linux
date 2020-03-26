@@ -716,7 +716,7 @@ static const struct i2c_device_id max77826_i2c_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, max77826_i2c_id);
 
-#ifdef CONFIG_OF
+#if 0
 static struct of_device_id max77826_match_table[] = {
 	{ .compatible = "max77826,max77826-regulator",},
 	{ },
@@ -727,7 +727,7 @@ static struct i2c_driver max77826_i2c_driver = {
 	.driver = {
 		.name = "max77826",
 		.owner = THIS_MODULE,
-#ifdef CONFIG_OF
+#if 0
 		.of_match_table = max77826_match_table,
 #endif
 	},
