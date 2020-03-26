@@ -162,6 +162,7 @@ static __le16 ieee80211_duration(struct ieee80211_tx_data *tx,
 			break;
 		}
 		case NL80211_BAND_5GHZ:
+		case NL80211_BAND_6GHZ:
 			if (r->flags & IEEE80211_RATE_MANDATORY_A)
 				mrate = r->bitrate;
 			break;
@@ -2262,6 +2263,15 @@ netdev_tx_t ieee80211_monitor_start_xmit(struct sk_buff *skb,
 						    payload[7]);
 	}
 
+	/*
+	 * Initialize skb->priority for QoS frames. This is put in the TID field
+	 * of the frame before passing it to the driver.
+	 */
+	if (ieee80211_is_data_qos(hdr->frame_control)) {
+		u8 *p = ieee80211_get_qos_ctl(hdr);
+		skb->priority = *p & IEEE80211_QOS_CTL_TAG1D_MASK;
+	}
+
 	memset(info, 0, sizeof(*info));
 
 	info->flags = IEEE80211_TX_CTL_REQ_TX_STATUS |
@@ -3546,6 +3556,8 @@ struct sk_buff *ieee80211_tx_dequeue(struct ieee80211_hw *hw,
 	ieee80211_tx_result r;
 	struct ieee80211_vif *vif = txq->vif;
 
+	WARN_ON_ONCE(softirq_count() == 0);
+
 begin:
 	spin_lock_bh(&fq->lock);
 
@@ -4647,7 +4659,8 @@ struct sk_buff *ieee80211_beacon_get_tim(struct ieee80211_hw *hw,
 	if (!sband)
 		return bcn;
 
-	ieee80211_tx_monitor(hw_to_local(hw), copy, sband, 1, shift, false);
+	ieee80211_tx_monitor(hw_to_local(hw), copy, sband, 1, shift, false,
+			     NULL);
 
 	return bcn;
 }

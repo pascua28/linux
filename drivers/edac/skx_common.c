@@ -136,11 +136,11 @@ void skx_set_decode(skx_decode_f decode)
 	skx_decode = decode;
 }
 
-int skx_get_src_id(struct skx_dev *d, u8 *id)
+int skx_get_src_id(struct skx_dev *d, int off, u8 *id)
 {
 	u32 reg;
 
-	if (pci_read_config_dword(d->util_all, 0xf0, &reg)) {
+	if (pci_read_config_dword(d->util_all, off, &reg)) {
 		skx_printk(KERN_ERR, "Failed to read src id\n");
 		return -ENODEV;
 	}
@@ -235,7 +235,7 @@ int skx_get_hi_lo(unsigned int did, int off[], u64 *tolm, u64 *tohm)
 
 	pdev = pci_get_device(PCI_VENDOR_ID_INTEL, did, NULL);
 	if (!pdev) {
-		skx_printk(KERN_ERR, "Can't get tolm/tohm\n");
+		edac_dbg(2, "Can't get tolm/tohm\n");
 		return -ENODEV;
 	}
 

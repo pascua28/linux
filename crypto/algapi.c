@@ -21,23 +21,6 @@
 
 static LIST_HEAD(crypto_template_list);
 
-static inline int crypto_set_driver_name(struct crypto_alg *alg)
-{
-	static const char suffix[] = "-generic";
-	char *driver_name = alg->cra_driver_name;
-	int len;
-
-	if (*driver_name)
-		return 0;
-
-	len = strlcpy(driver_name, alg->cra_name, CRYPTO_MAX_ALG_NAME);
-	if (len + sizeof(suffix) > CRYPTO_MAX_ALG_NAME)
-		return -ENAMETOOLONG;
-
-	memcpy(driver_name + len, suffix, sizeof(suffix));
-	return 0;
-}
-
 static inline void crypto_check_module_sig(struct module *mod)
 {
 	if (fips_enabled && mod && !module_sig_ok(mod))
@@ -48,6 +31,9 @@ static inline void crypto_check_module_sig(struct module *mod)
 static int crypto_check_alg(struct crypto_alg *alg)
 {
 	crypto_check_module_sig(alg->cra_module);
+
+	if (!alg->cra_name[0] || !alg->cra_driver_name[0])
+		return -EINVAL;
 
 	if (alg->cra_alignmask & (alg->cra_alignmask + 1))
 		return -EINVAL;
@@ -74,7 +60,7 @@ static int crypto_check_alg(struct crypto_alg *alg)
 
 	refcount_set(&alg->cra_refcnt, 1);
 
-	return crypto_set_driver_name(alg);
+	return 0;
 }
 
 static void crypto_free_instance(struct crypto_instance *inst)
@@ -271,6 +257,7 @@ void crypto_alg_tested(const char *name, int err)
 	struct crypto_alg *alg;
 	struct crypto_alg *q;
 	LIST_HEAD(list);
+	bool best;
 
 	down_write(&crypto_alg_sem);
 	list_for_each_entry(q, &crypto_alg_list, cra_list) {
@@ -293,6 +280,21 @@ found:
 		goto complete;
 
 	alg->cra_flags |= CRYPTO_ALG_TESTED;
+
+	/* Only satisfy larval waiters if we are the best. */
+	best = true;
+	list_for_each_entry(q, &crypto_alg_list, cra_list) {
+		if (crypto_is_moribund(q) || !crypto_is_larval(q))
+			continue;
+
+		if (strcmp(alg->cra_name, q->cra_name))
+			continue;
+
+		if (q->cra_priority > alg->cra_priority) {
+			best = false;
+			break;
+		}
+	}
 
 	list_for_each_entry(q, &crypto_alg_list, cra_list) {
 		if (q == alg)
@@ -317,10 +319,12 @@ found:
 				continue;
 			if ((q->cra_flags ^ alg->cra_flags) & larval->mask)
 				continue;
-			if (!crypto_mod_get(alg))
-				continue;
 
-			larval->adult = alg;
+			if (best && crypto_mod_get(alg))
+				larval->adult = alg;
+			else
+				larval->adult = ERR_PTR(-EAGAIN);
+
 			continue;
 		}
 
@@ -683,11 +687,9 @@ EXPORT_SYMBOL_GPL(crypto_grab_spawn);
 
 void crypto_drop_spawn(struct crypto_spawn *spawn)
 {
-	if (!spawn->alg)
-		return;
-
 	down_write(&crypto_alg_sem);
-	list_del(&spawn->list);
+	if (spawn->alg)
+		list_del(&spawn->list);
 	up_write(&crypto_alg_sem);
 }
 EXPORT_SYMBOL_GPL(crypto_drop_spawn);
@@ -695,22 +697,16 @@ EXPORT_SYMBOL_GPL(crypto_drop_spawn);
 static struct crypto_alg *crypto_spawn_alg(struct crypto_spawn *spawn)
 {
 	struct crypto_alg *alg;
-	struct crypto_alg *alg2;
 
 	down_read(&crypto_alg_sem);
 	alg = spawn->alg;
-	alg2 = alg;
-	if (alg2)
-		alg2 = crypto_mod_get(alg2);
+	if (alg && !crypto_mod_get(alg)) {
+		alg->cra_flags |= CRYPTO_ALG_DYING;
+		alg = NULL;
+	}
 	up_read(&crypto_alg_sem);
 
-	if (!alg2) {
-		if (alg)
-			crypto_shoot_alg(alg);
-		return ERR_PTR(-EAGAIN);
-	}
-
-	return alg;
+	return alg ?: ERR_PTR(-EAGAIN);
 }
 
 struct crypto_tfm *crypto_spawn_tfm(struct crypto_spawn *spawn, u32 type,
@@ -946,19 +942,6 @@ struct crypto_async_request *crypto_dequeue_request(struct crypto_queue *queue)
 	return list_entry(request, struct crypto_async_request, list);
 }
 EXPORT_SYMBOL_GPL(crypto_dequeue_request);
-
-int crypto_tfm_in_queue(struct crypto_queue *queue, struct crypto_tfm *tfm)
-{
-	struct crypto_async_request *req;
-
-	list_for_each_entry(req, &queue->list, list) {
-		if (req->tfm == tfm)
-			return 1;
-	}
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(crypto_tfm_in_queue);
 
 static inline void crypto_inc_byte(u8 *a, unsigned int size)
 {

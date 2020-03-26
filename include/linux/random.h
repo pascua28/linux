@@ -19,6 +19,7 @@ struct random_ready_callback {
 };
 
 extern void add_device_randomness(const void *, unsigned int);
+extern void add_bootloader_randomness(const void *, unsigned int);
 
 #if defined(LATENT_ENTROPY_PLUGIN) && !defined(__CHECKER__)
 static inline void add_latent_entropy(void)
@@ -166,29 +167,21 @@ static inline void prandom_seed_state(struct rnd_state *state, u64 seed)
 #ifdef CONFIG_ARCH_RANDOM
 # include <asm/archrandom.h>
 #else
-static inline bool arch_get_random_long(unsigned long *v)
+static inline bool __must_check arch_get_random_long(unsigned long *v)
 {
-	return 0;
+	return false;
 }
-static inline bool arch_get_random_int(unsigned int *v)
+static inline bool __must_check arch_get_random_int(unsigned int *v)
 {
-	return 0;
+	return false;
 }
-static inline bool arch_has_random(void)
+static inline bool __must_check arch_get_random_seed_long(unsigned long *v)
 {
-	return 0;
+	return false;
 }
-static inline bool arch_get_random_seed_long(unsigned long *v)
+static inline bool __must_check arch_get_random_seed_int(unsigned int *v)
 {
-	return 0;
-}
-static inline bool arch_get_random_seed_int(unsigned int *v)
-{
-	return 0;
-}
-static inline bool arch_has_random_seed(void)
-{
-	return 0;
+	return false;
 }
 #endif
 

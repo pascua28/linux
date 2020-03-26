@@ -8,6 +8,7 @@
 #include <linux/pagemap.h>
 #include <linux/highmem.h>
 #include <linux/sched/mm.h>
+#include <crypto/hash.h>
 #include "ctree.h"
 #include "disk-io.h"
 #include "transaction.h"
@@ -22,9 +23,13 @@
 #define MAX_CSUM_ITEMS(r, size) (min_t(u32, __MAX_CSUM_ITEMS(r, size), \
 				       PAGE_SIZE))
 
-#define MAX_ORDERED_SUM_BYTES(fs_info) ((PAGE_SIZE - \
-				   sizeof(struct btrfs_ordered_sum)) / \
-				   sizeof(u32) * (fs_info)->sectorsize)
+static inline u32 max_ordered_sum_bytes(struct btrfs_fs_info *fs_info,
+					u16 csum_size)
+{
+	u32 ncsums = (PAGE_SIZE - sizeof(struct btrfs_ordered_sum)) / csum_size;
+
+	return ncsums * fs_info->sectorsize;
+}
 
 int btrfs_insert_file_extent(struct btrfs_trans_handle *trans,
 			     struct btrfs_root *root,
@@ -144,7 +149,7 @@ int btrfs_lookup_file_extent(struct btrfs_trans_handle *trans,
 }
 
 static blk_status_t __btrfs_lookup_bio_sums(struct inode *inode, struct bio *bio,
-				   u64 logical_offset, u32 *dst, int dio)
+				   u64 logical_offset, u8 *dst, int dio)
 {
 	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
 	struct bio_vec bvec;
@@ -182,7 +187,7 @@ static blk_status_t __btrfs_lookup_bio_sums(struct inode *inode, struct bio *bio
 		}
 		csum = btrfs_bio->csum;
 	} else {
-		csum = (u8 *)dst;
+		csum = dst;
 	}
 
 	if (bio->bi_iter.bi_size > PAGE_SIZE * 8)
@@ -211,7 +216,7 @@ static blk_status_t __btrfs_lookup_bio_sums(struct inode *inode, struct bio *bio
 		if (!dio)
 			offset = page_offset(bvec.bv_page) + bvec.bv_offset;
 		count = btrfs_find_ordered_sum(inode, offset, disk_bytenr,
-					       (u32 *)csum, nblocks);
+					       csum, nblocks);
 		if (count)
 			goto found;
 
@@ -269,7 +274,8 @@ found:
 		csum += count * csum_size;
 		nblocks -= count;
 next:
-		while (count--) {
+		while (count > 0) {
+			count--;
 			disk_bytenr += fs_info->sectorsize;
 			offset += fs_info->sectorsize;
 			page_bytes_left -= fs_info->sectorsize;
@@ -283,7 +289,8 @@ next:
 	return 0;
 }
 
-blk_status_t btrfs_lookup_bio_sums(struct inode *inode, struct bio *bio, u32 *dst)
+blk_status_t btrfs_lookup_bio_sums(struct inode *inode, struct bio *bio,
+				   u8 *dst)
 {
 	return __btrfs_lookup_bio_sums(inode, bio, 0, dst, 0);
 }
@@ -374,7 +381,7 @@ int btrfs_lookup_csums_range(struct btrfs_root *root, u64 start, u64 end,
 				      struct btrfs_csum_item);
 		while (start < csum_end) {
 			size = min_t(size_t, csum_end - start,
-				     MAX_ORDERED_SUM_BYTES(fs_info));
+				     max_ordered_sum_bytes(fs_info, csum_size));
 			sums = kzalloc(btrfs_ordered_sum_size(fs_info, size),
 				       GFP_NOFS);
 			if (!sums) {
@@ -427,6 +434,7 @@ blk_status_t btrfs_csum_one_bio(struct inode *inode, struct bio *bio,
 		       u64 file_start, int contig)
 {
 	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+	SHASH_DESC_ON_STACK(shash, fs_info->csum_shash);
 	struct btrfs_ordered_sum *sums;
 	struct btrfs_ordered_extent *ordered = NULL;
 	char *data;
@@ -439,6 +447,7 @@ blk_status_t btrfs_csum_one_bio(struct inode *inode, struct bio *bio,
 	int i;
 	u64 offset;
 	unsigned nofs_flag;
+	const u16 csum_size = btrfs_super_csum_size(fs_info->super_copy);
 
 	nofs_flag = memalloc_nofs_save();
 	sums = kvzalloc(btrfs_ordered_sum_size(fs_info, bio->bi_iter.bi_size),
@@ -458,6 +467,8 @@ blk_status_t btrfs_csum_one_bio(struct inode *inode, struct bio *bio,
 
 	sums->bytenr = (u64)bio->bi_iter.bi_sector << 9;
 	index = 0;
+
+	shash->tfm = fs_info->csum_shash;
 
 	bio_for_each_segment(bvec, bio, iter) {
 		if (!contig)
@@ -498,17 +509,14 @@ blk_status_t btrfs_csum_one_bio(struct inode *inode, struct bio *bio,
 				index = 0;
 			}
 
-			sums->sums[index] = ~(u32)0;
+			crypto_shash_init(shash);
 			data = kmap_atomic(bvec.bv_page);
-			sums->sums[index]
-				= btrfs_csum_data(data + bvec.bv_offset
-						+ (i * fs_info->sectorsize),
-						sums->sums[index],
-						fs_info->sectorsize);
+			crypto_shash_update(shash, data + bvec.bv_offset
+					    + (i * fs_info->sectorsize),
+					    fs_info->sectorsize);
 			kunmap_atomic(data);
-			btrfs_csum_final(sums->sums[index],
-					(char *)(sums->sums + index));
-			index++;
+			crypto_shash_final(shash, (char *)(sums->sums + index));
+			index += csum_size;
 			offset += fs_info->sectorsize;
 			this_sum_bytes += fs_info->sectorsize;
 			total_bytes += fs_info->sectorsize;
@@ -583,9 +591,9 @@ static noinline void truncate_one_csum(struct btrfs_fs_info *fs_info,
  * range of bytes.
  */
 int btrfs_del_csums(struct btrfs_trans_handle *trans,
-		    struct btrfs_fs_info *fs_info, u64 bytenr, u64 len)
+		    struct btrfs_root *root, u64 bytenr, u64 len)
 {
-	struct btrfs_root *root = fs_info->csum_root;
+	struct btrfs_fs_info *fs_info = trans->fs_info;
 	struct btrfs_path *path;
 	struct btrfs_key key;
 	u64 end_byte = bytenr + len;
@@ -594,6 +602,9 @@ int btrfs_del_csums(struct btrfs_trans_handle *trans,
 	int ret;
 	u16 csum_size = btrfs_super_csum_size(fs_info->super_copy);
 	int blocksize_bits = fs_info->sb->s_blocksize_bits;
+
+	ASSERT(root == fs_info->csum_root ||
+	       root->root_key.objectid == BTRFS_TREE_LOG_OBJECTID);
 
 	path = btrfs_alloc_path();
 	if (!path)
@@ -904,9 +915,9 @@ found:
 	write_extent_buffer(leaf, sums->sums + index, (unsigned long)item,
 			    ins_size);
 
+	index += ins_size;
 	ins_size /= csum_size;
 	total_bytes += ins_size * fs_info->sectorsize;
-	index += ins_size;
 
 	btrfs_mark_buffer_dirty(path->nodes[0]);
 	if (total_bytes < sums->len) {

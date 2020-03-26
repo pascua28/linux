@@ -21,10 +21,18 @@
  */
 
 #include <linux/export.h>
-#include <drm/drmP.h>
+#include <linux/uaccess.h>
+
+#include <drm/drm_crtc.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_file.h>
+#include <drm/drm_framebuffer.h>
 #include <drm/drm_property.h>
 
 #include "drm_crtc_internal.h"
+
+#define MAX_BLOB_PROP_SIZE	(PAGE_SIZE * 30)
+#define MAX_BLOB_PROP_COUNT	250
 
 /**
  * DOC: overview
@@ -556,7 +564,7 @@ drm_property_create_blob(struct drm_device *dev, size_t length,
 	struct drm_property_blob *blob;
 	int ret;
 
-	if (!length || length > ULONG_MAX - sizeof(struct drm_property_blob))
+	if (!length || length > INT_MAX - sizeof(struct drm_property_blob))
 		return ERR_PTR(-EINVAL);
 
 	blob = kvzalloc(sizeof(struct drm_property_blob)+length, GFP_KERNEL);
@@ -782,10 +790,19 @@ int drm_mode_createblob_ioctl(struct drm_device *dev,
 			      void *data, struct drm_file *file_priv)
 {
 	struct drm_mode_create_blob *out_resp = data;
-	struct drm_property_blob *blob;
+	struct drm_property_blob *blob, *bt;
 	int ret = 0;
+	u32 count = 0;
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
+		return -EOPNOTSUPP;
+
+	mutex_lock(&dev->mode_config.blob_lock);
+	list_for_each_entry(bt, &file_priv->blobs, head_file)
+		count++;
+	mutex_unlock(&dev->mode_config.blob_lock);
+
+	if (count >= MAX_BLOB_PROP_COUNT)
 		return -EOPNOTSUPP;
 
 	blob = drm_property_create_blob(dev, out_resp->length, NULL);

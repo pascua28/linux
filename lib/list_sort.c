@@ -8,7 +8,7 @@
 #include <linux/list.h>
 
 typedef int __attribute__((nonnull(2,3))) (*cmp_func)(void *,
-		struct list_head const *, struct list_head const *);
+		struct list_head *, struct list_head *);
 
 /*
  * Returns a list organized in an intermediate format suited
@@ -157,9 +157,11 @@ static void merge_final(void *priv, cmp_func cmp, struct list_head *head,
  *
  * The number of pending lists of size 2^k is determined by the
  * state of bit k of "count" plus two extra pieces of information:
+ *
  * - The state of bit k-1 (when k == 0, consider bit -1 always set), and
  * - Whether the higher-order bits are zero or non-zero (i.e.
  *   is count >= 2^(k+1)).
+ *
  * There are six states we distinguish.  "x" represents some arbitrary
  * bits, and "y" represents some arbitrary non-zero bits:
  * 0:  00x: 0 pending of size 2^k;           x pending of sizes < 2^k
@@ -225,7 +227,7 @@ void list_sort(void *priv, struct list_head *head,
 		if (likely(bits)) {
 			struct list_head *a = *tail, *b = a->prev;
 
-			a = merge(priv, (cmp_func)cmp, b, a);
+			a = merge(priv, cmp, b, a);
 			/* Install the merged result in place of the inputs */
 			a->prev = b->prev;
 			*tail = a;
@@ -247,10 +249,10 @@ void list_sort(void *priv, struct list_head *head,
 
 		if (!next)
 			break;
-		list = merge(priv, (cmp_func)cmp, pending, list);
+		list = merge(priv, cmp, pending, list);
 		pending = next;
 	}
 	/* The final merge, rebuilding prev links */
-	merge_final(priv, (cmp_func)cmp, head, pending, list);
+	merge_final(priv, cmp, head, pending, list);
 }
 EXPORT_SYMBOL(list_sort);

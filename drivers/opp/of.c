@@ -77,8 +77,6 @@ static struct dev_pm_opp *_find_opp_of_np(struct opp_table *opp_table,
 {
 	struct dev_pm_opp *opp;
 
-	lockdep_assert_held(&opp_table_lock);
-
 	mutex_lock(&opp_table->lock);
 
 	list_for_each_entry(opp, &opp_table->opp_list, node) {
@@ -138,7 +136,6 @@ err:
 static void _opp_table_free_required_tables(struct opp_table *opp_table)
 {
 	struct opp_table **required_opp_tables = opp_table->required_opp_tables;
-	struct device **genpd_virt_devs = opp_table->genpd_virt_devs;
 	int i;
 
 	if (!required_opp_tables)
@@ -152,10 +149,8 @@ static void _opp_table_free_required_tables(struct opp_table *opp_table)
 	}
 
 	kfree(required_opp_tables);
-	kfree(genpd_virt_devs);
 
 	opp_table->required_opp_count = 0;
-	opp_table->genpd_virt_devs = NULL;
 	opp_table->required_opp_tables = NULL;
 }
 
@@ -168,9 +163,8 @@ static void _opp_table_alloc_required_tables(struct opp_table *opp_table,
 					     struct device_node *opp_np)
 {
 	struct opp_table **required_opp_tables;
-	struct device **genpd_virt_devs = NULL;
 	struct device_node *required_np, *np;
-	int count, count_pd, i;
+	int count, i;
 
 	/* Traversing the first OPP node is all we need */
 	np = of_get_next_available_child(opp_np, NULL);
@@ -183,33 +177,11 @@ static void _opp_table_alloc_required_tables(struct opp_table *opp_table,
 	if (!count)
 		goto put_np;
 
-	/*
-	 * Check the number of power-domains to know if we need to deal
-	 * with virtual devices. In some cases we have devices with multiple
-	 * power domains but with only one of them being scalable, hence
-	 * 'count' could be 1, but we still have to deal with multiple genpds
-	 * and virtual devices.
-	 */
-	count_pd = of_count_phandle_with_args(dev->of_node, "power-domains",
-					      "#power-domain-cells");
-	if (!count_pd)
-		goto put_np;
-
-	if (count_pd > 1) {
-		genpd_virt_devs = kcalloc(count, sizeof(*genpd_virt_devs),
-					GFP_KERNEL);
-		if (!genpd_virt_devs)
-			goto put_np;
-	}
-
 	required_opp_tables = kcalloc(count, sizeof(*required_opp_tables),
 				      GFP_KERNEL);
-	if (!required_opp_tables) {
-		kfree(genpd_virt_devs);
+	if (!required_opp_tables)
 		goto put_np;
-	}
 
-	opp_table->genpd_virt_devs = genpd_virt_devs;
 	opp_table->required_opp_tables = required_opp_tables;
 	opp_table->required_opp_count = count;
 
@@ -643,9 +615,12 @@ static struct dev_pm_opp *_opp_add_static_v2(struct opp_table *opp_table,
 	/* OPP to select on device suspend */
 	if (of_property_read_bool(np, "opp-suspend")) {
 		if (opp_table->suspend_opp) {
-			dev_warn(dev, "%s: Multiple suspend OPPs found (%lu %lu)\n",
-				 __func__, opp_table->suspend_opp->rate,
-				 new_opp->rate);
+			/* Pick the OPP with higher rate as suspend OPP */
+			if (new_opp->rate > opp_table->suspend_opp->rate) {
+				opp_table->suspend_opp->suspend = false;
+				new_opp->suspend = true;
+				opp_table->suspend_opp = new_opp;
+			}
 		} else {
 			new_opp->suspend = true;
 			opp_table->suspend_opp = new_opp;
@@ -688,6 +663,11 @@ static int _of_add_opp_table_v2(struct device *dev, struct opp_table *opp_table)
 		return 0;
 	}
 
+	/*
+	 * Re-initialize list_kref every time we add static OPPs to the OPP
+	 * table as the reference count may be 0 after the last tie static OPPs
+	 * were removed.
+	 */
 	kref_init(&opp_table->list_kref);
 
 	/* We have opp-table node now, iterate over it and add OPPs */
@@ -756,8 +736,6 @@ static int _of_add_opp_table_v1(struct device *dev, struct opp_table *opp_table)
 		dev_err(dev, "%s: Invalid OPP table\n", __func__);
 		return -EINVAL;
 	}
-
-	kref_init(&opp_table->list_kref);
 
 	val = prop->value;
 	while (nr) {

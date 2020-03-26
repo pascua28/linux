@@ -346,8 +346,10 @@ int __rtc_register_device(struct module *owner, struct rtc_device *rtc)
 	struct rtc_wkalrm alrm;
 	int err;
 
-	if (!rtc->ops)
+	if (!rtc->ops) {
+		dev_dbg(&rtc->dev, "no ops set\n");
 		return -EINVAL;
+	}
 
 	rtc->owner = owner;
 	rtc_device_get_offset(rtc);
@@ -372,6 +374,11 @@ int __rtc_register_device(struct module *owner, struct rtc_device *rtc)
 	rtc->registered = true;
 	dev_info(rtc->dev.parent, "registered as %s\n",
 		 dev_name(&rtc->dev));
+
+#ifdef CONFIG_RTC_HCTOSYS_DEVICE
+	if (!strcmp(dev_name(&rtc->dev), CONFIG_RTC_HCTOSYS_DEVICE))
+		rtc_hctosys();
+#endif
 
 	return 0;
 }

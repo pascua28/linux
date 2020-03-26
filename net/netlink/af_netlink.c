@@ -241,13 +241,8 @@ static __net_init int netlink_tap_init_net(struct net *net)
 	return 0;
 }
 
-static void __net_exit netlink_tap_exit_net(struct net *net)
-{
-}
-
 static struct pernet_operations netlink_tap_net_ops = {
 	.init = netlink_tap_init_net,
-	.exit = netlink_tap_exit_net,
 	.id   = &netlink_tap_net_id,
 	.size = sizeof(struct netlink_tap_net),
 };
@@ -1019,7 +1014,8 @@ static int netlink_bind(struct socket *sock, struct sockaddr *addr,
 	if (nlk->netlink_bind && groups) {
 		int group;
 
-		for (group = 0; group < nlk->ngroups; group++) {
+		/* nl_groups is a u32, so cap the maximum groups we can bind */
+		for (group = 0; group < BITS_PER_TYPE(u32); group++) {
 			if (!test_bit(group, &groups))
 				continue;
 			err = nlk->netlink_bind(net, group + 1);
@@ -1038,7 +1034,7 @@ static int netlink_bind(struct socket *sock, struct sockaddr *addr,
 			netlink_insert(sk, nladdr->nl_pid) :
 			netlink_autobind(sock);
 		if (err) {
-			netlink_undo_bind(nlk->ngroups, groups, sk);
+			netlink_undo_bind(BITS_PER_TYPE(u32), groups, sk);
 			goto unlock;
 		}
 	}
@@ -2438,7 +2434,7 @@ void netlink_ack(struct sk_buff *in_skb, struct nlmsghdr *nlh, int err,
 							       in_skb->len))
 				WARN_ON(nla_put_u32(skb, NLMSGERR_ATTR_OFFS,
 						    (u8 *)extack->bad_attr -
-						    in_skb->data));
+						    (u8 *)nlh));
 		} else {
 			if (extack->cookie_len)
 				WARN_ON(nla_put(skb, NLMSGERR_ATTR_COOKIE,
@@ -2544,12 +2540,10 @@ struct nl_seq_iter {
 	int link;
 };
 
-static int netlink_walk_start(struct nl_seq_iter *iter)
+static void netlink_walk_start(struct nl_seq_iter *iter)
 {
 	rhashtable_walk_enter(&nl_table[iter->link].hash, &iter->hti);
 	rhashtable_walk_start(&iter->hti);
-
-	return 0;
 }
 
 static void netlink_walk_stop(struct nl_seq_iter *iter)
@@ -2565,8 +2559,6 @@ static void *__netlink_seq_next(struct seq_file *seq)
 
 	do {
 		for (;;) {
-			int err;
-
 			nlk = rhashtable_walk_next(&iter->hti);
 
 			if (IS_ERR(nlk)) {
@@ -2583,9 +2575,7 @@ static void *__netlink_seq_next(struct seq_file *seq)
 			if (++iter->link >= MAX_LINKS)
 				return NULL;
 
-			err = netlink_walk_start(iter);
-			if (err)
-				return ERR_PTR(err);
+			netlink_walk_start(iter);
 		}
 	} while (sock_net(&nlk->sk) != seq_file_net(seq));
 
@@ -2597,13 +2587,10 @@ static void *netlink_seq_start(struct seq_file *seq, loff_t *posp)
 	struct nl_seq_iter *iter = seq->private;
 	void *obj = SEQ_START_TOKEN;
 	loff_t pos;
-	int err;
 
 	iter->link = 0;
 
-	err = netlink_walk_start(iter);
-	if (err)
-		return ERR_PTR(err);
+	netlink_walk_start(iter);
 
 	for (pos = *posp; pos && obj && !IS_ERR(obj); pos--)
 		obj = __netlink_seq_next(seq);

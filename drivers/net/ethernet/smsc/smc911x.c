@@ -712,6 +712,7 @@ static void smc911x_phy_detect(struct net_device *dev)
 					/* Found an external PHY */
 					break;
 			}
+			/* Else, fall through */
 		default:
 			/* Internal media only */
 			SMC_GET_PHY_ID1(lp, 1, id1);
@@ -935,7 +936,7 @@ static void smc911x_phy_configure(struct work_struct *work)
 	if (lp->ctl_rspeed != 100)
 		my_ad_caps &= ~(ADVERTISE_100BASE4|ADVERTISE_100FULL|ADVERTISE_100HALF);
 
-	 if (!lp->ctl_rfduplx)
+	if (!lp->ctl_rfduplx)
 		my_ad_caps &= ~(ADVERTISE_100FULL|ADVERTISE_10FULL);
 
 	/* Update our Auto-Neg Advertisement Register */

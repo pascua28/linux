@@ -482,8 +482,28 @@ struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern)
 		}
 		spin_unlock_bh(&queue->fastopenq.lock);
 	}
+
 out:
 	release_sock(sk);
+	if (newsk && mem_cgroup_sockets_enabled) {
+		int amt;
+
+		/* atomically get the memory usage, set and charge the
+		 * newsk->sk_memcg.
+		 */
+		lock_sock(newsk);
+
+		/* The socket has not been accepted yet, no need to look at
+		 * newsk->sk_wmem_queued.
+		 */
+		amt = sk_mem_pages(newsk->sk_forward_alloc +
+				   atomic_read(&newsk->sk_rmem_alloc));
+		mem_cgroup_sk_alloc(newsk);
+		if (newsk->sk_memcg && amt)
+			mem_cgroup_charge_skmem(newsk->sk_memcg, amt);
+
+		release_sock(newsk);
+	}
 	if (req)
 		reqsk_put(req);
 	return newsk;
@@ -560,7 +580,7 @@ struct dst_entry *inet_csk_route_req(const struct sock *sk,
 	rt = ip_route_output_flow(net, fl4, sk);
 	if (IS_ERR(rt))
 		goto no_route;
-	if (opt && opt->opt.is_strictroute && rt->rt_gw_family)
+	if (opt && opt->opt.is_strictroute && rt->rt_uses_gateway)
 		goto route_err;
 	rcu_read_unlock();
 	return &rt->dst;
@@ -598,7 +618,7 @@ struct dst_entry *inet_csk_route_child_sock(const struct sock *sk,
 	rt = ip_route_output_flow(net, fl4, sk);
 	if (IS_ERR(rt))
 		goto no_route;
-	if (opt && opt->opt.is_strictroute && rt->rt_gw_family)
+	if (opt && opt->opt.is_strictroute && rt->rt_uses_gateway)
 		goto route_err;
 	return &rt->dst;
 
@@ -649,8 +669,7 @@ int inet_rtx_syn_ack(const struct sock *parent, struct request_sock *req)
 EXPORT_SYMBOL(inet_rtx_syn_ack);
 
 /* return true if req was found in the ehash table */
-static bool reqsk_queue_unlink(struct request_sock_queue *queue,
-			       struct request_sock *req)
+static bool reqsk_queue_unlink(struct request_sock *req)
 {
 	struct inet_hashinfo *hashinfo = req_to_sk(req)->sk_prot->h.hashinfo;
 	bool found = false;
@@ -669,7 +688,7 @@ static bool reqsk_queue_unlink(struct request_sock_queue *queue,
 
 void inet_csk_reqsk_queue_drop(struct sock *sk, struct request_sock *req)
 {
-	if (reqsk_queue_unlink(&inet_csk(sk)->icsk_accept_queue, req)) {
+	if (reqsk_queue_unlink(req)) {
 		reqsk_queue_removed(&inet_csk(sk)->icsk_accept_queue, req);
 		reqsk_put(req);
 	}
@@ -907,7 +926,7 @@ static void inet_child_forget(struct sock *sk, struct request_sock *req,
 	percpu_counter_inc(sk->sk_prot->orphan_count);
 
 	if (sk->sk_protocol == IPPROTO_TCP && tcp_rsk(req)->tfo_listener) {
-		BUG_ON(tcp_sk(child)->fastopen_rsk != req);
+		BUG_ON(rcu_access_pointer(tcp_sk(child)->fastopen_rsk) != req);
 		BUG_ON(sk != req->rsk_listener);
 
 		/* Paranoid, to prevent race condition if
@@ -916,7 +935,7 @@ static void inet_child_forget(struct sock *sk, struct request_sock *req,
 		 * Also to satisfy an assertion in
 		 * tcp_v4_destroy_sock().
 		 */
-		tcp_sk(child)->fastopen_rsk = NULL;
+		RCU_INIT_POINTER(tcp_sk(child)->fastopen_rsk, NULL);
 	}
 	inet_csk_destroy_sock(child);
 }
@@ -935,7 +954,7 @@ struct sock *inet_csk_reqsk_queue_add(struct sock *sk,
 		req->sk = child;
 		req->dl_next = NULL;
 		if (queue->rskq_accept_head == NULL)
-			queue->rskq_accept_head = req;
+			WRITE_ONCE(queue->rskq_accept_head, req);
 		else
 			queue->rskq_accept_tail->dl_next = req;
 		queue->rskq_accept_tail = req;
@@ -1087,7 +1106,7 @@ struct dst_entry *inet_csk_update_pmtu(struct sock *sk, u32 mtu)
 		if (!dst)
 			goto out;
 	}
-	dst->ops->update_pmtu(dst, sk, NULL, mtu);
+	dst->ops->update_pmtu(dst, sk, NULL, mtu, true);
 
 	dst = __sk_dst_check(sk, 0);
 	if (!dst)

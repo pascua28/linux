@@ -21,12 +21,11 @@
 #include <linux/rbtree_latch.h>
 #include <linux/error-injection.h>
 #include <linux/tracepoint-defs.h>
+#include <linux/srcu.h>
+#include <linux/cfi.h>
 
 #include <linux/percpu.h>
 #include <asm/module.h>
-
-/* In stripped ARM and x86-64 modules, ~ is surprisingly rare. */
-#define MODULE_SIG_STRING "~Module signature appended~\n"
 
 /* Not Yet Implemented */
 #define MODULE_SUPPORTED_DEVICE(name)
@@ -275,6 +274,8 @@ extern typeof(name) __mod_##type##__##name##_device_table		\
  * files require multiple MODULE_FIRMWARE() specifiers */
 #define MODULE_FIRMWARE(_firmware) MODULE_INFO(firmware, _firmware)
 
+#define MODULE_IMPORT_NS(ns) MODULE_INFO(import_ns, #ns)
+
 struct notifier_block;
 
 #ifdef CONFIG_MODULES
@@ -365,6 +366,10 @@ struct module {
 	const s32 *crcs;
 	unsigned int num_syms;
 
+#ifdef CONFIG_CFI_CLANG
+	cfi_check_fn cfi_check;
+#endif
+
 	/* Kernel parameters. */
 #ifdef CONFIG_SYSFS
 	struct mutex param_lock;
@@ -389,10 +394,12 @@ struct module {
 	const s32 *unused_gpl_crcs;
 #endif
 
-#ifdef CONFIG_MODULE_SIG
-	/* Signature was verified. */
+	/*
+	 * Signature was verified. Unconditionally compiled in Android to
+	 * preserve ABI compatibility between kernels without module
+	 * signing enabled and signed modules.
+	 */
 	bool sig_ok;
-#endif
 
 	bool async_probe_requested;
 
@@ -449,6 +456,10 @@ struct module {
 #ifdef CONFIG_TRACEPOINTS
 	unsigned int num_tracepoints;
 	tracepoint_ptr_t *tracepoints_ptrs;
+#endif
+#ifdef CONFIG_TREE_SRCU
+	unsigned int num_srcu_structs;
+	struct srcu_struct **srcu_struct_ptrs;
 #endif
 #ifdef CONFIG_BPF_EVENTS
 	unsigned int num_bpf_raw_events;

@@ -205,16 +205,6 @@ static void typec_altmode_put_partner(struct altmode *altmode)
 	put_device(&adev->dev);
 }
 
-static int typec_port_fwnode_match(struct device *dev, const void *fwnode)
-{
-	return dev_fwnode(dev) == fwnode;
-}
-
-static int typec_port_name_match(struct device *dev, const void *name)
-{
-	return !strcmp((const char *)name, dev_name(dev));
-}
-
 static void *typec_port_match(struct device_connection *con, int ep, void *data)
 {
 	struct device *dev;
@@ -224,11 +214,9 @@ static void *typec_port_match(struct device_connection *con, int ep, void *data)
 	 * we need to return ERR_PTR(-PROBE_DEFER) when there is no device.
 	 */
 	if (con->fwnode)
-		return class_find_device(typec_class, NULL, con->fwnode,
-					 typec_port_fwnode_match);
+		return class_find_device_by_fwnode(typec_class, con->fwnode);
 
-	dev = class_find_device(typec_class, NULL, con->endpoint[ep],
-				typec_port_name_match);
+	dev = class_find_device_by_name(typec_class, con->endpoint[ep]);
 
 	return dev ? dev : ERR_PTR(-EPROBE_DEFER);
 }
@@ -1604,14 +1592,16 @@ struct typec_port *typec_register_port(struct device *parent,
 
 	port->sw = typec_switch_get(&port->dev);
 	if (IS_ERR(port->sw)) {
+		ret = PTR_ERR(port->sw);
 		put_device(&port->dev);
-		return ERR_CAST(port->sw);
+		return ERR_PTR(ret);
 	}
 
 	port->mux = typec_mux_get(&port->dev, NULL);
 	if (IS_ERR(port->mux)) {
+		ret = PTR_ERR(port->mux);
 		put_device(&port->dev);
-		return ERR_CAST(port->mux);
+		return ERR_PTR(ret);
 	}
 
 	ret = device_add(&port->dev);
@@ -1646,13 +1636,25 @@ static int __init typec_init(void)
 	if (ret)
 		return ret;
 
+	ret = class_register(&typec_mux_class);
+	if (ret)
+		goto err_unregister_bus;
+
 	typec_class = class_create(THIS_MODULE, "typec");
 	if (IS_ERR(typec_class)) {
-		bus_unregister(&typec_bus);
-		return PTR_ERR(typec_class);
+		ret = PTR_ERR(typec_class);
+		goto err_unregister_mux_class;
 	}
 
 	return 0;
+
+err_unregister_mux_class:
+	class_unregister(&typec_mux_class);
+
+err_unregister_bus:
+	bus_unregister(&typec_bus);
+
+	return ret;
 }
 subsys_initcall(typec_init);
 
@@ -1661,6 +1663,7 @@ static void __exit typec_exit(void)
 	class_destroy(typec_class);
 	ida_destroy(&typec_index_ida);
 	bus_unregister(&typec_bus);
+	class_unregister(&typec_mux_class);
 }
 module_exit(typec_exit);
 

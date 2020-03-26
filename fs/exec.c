@@ -1015,7 +1015,7 @@ static int exec_mmap(struct mm_struct *mm)
 	/* Notify parent that we're no longer interested in the old VM */
 	tsk = current;
 	old_mm = current->mm;
-	mm_release(tsk, old_mm);
+	exec_mm_release(tsk, old_mm);
 
 	if (old_mm) {
 		sync_mm_rss(old_mm);
@@ -1033,6 +1033,7 @@ static int exec_mmap(struct mm_struct *mm)
 	}
 	task_lock(tsk);
 	active_mm = tsk->active_mm;
+	membarrier_exec_mmap(mm);
 	tsk->mm = mm;
 	tsk->active_mm = mm;
 	activate_mm(active_mm, mm);
@@ -1312,7 +1313,7 @@ EXPORT_SYMBOL(flush_old_exec);
 void would_dump(struct linux_binprm *bprm, struct file *file)
 {
 	struct inode *inode = file_inode(file);
-	if (inode_permission(inode, MAY_READ) < 0) {
+	if (inode_permission2(file->f_path.mnt, inode, MAY_READ) < 0) {
 		struct user_namespace *old, *user_ns;
 		bprm->interp_flags |= BINPRM_FLAGS_ENFORCE_NONDUMP;
 
@@ -1663,7 +1664,7 @@ int search_binary_handler(struct linux_binprm *bprm)
 		if (retval < 0 && !bprm->mm) {
 			/* we got to flush_old_exec() and failed after it */
 			read_unlock(&binfmt_lock);
-			force_sigsegv(SIGSEGV, current);
+			force_sigsegv(SIGSEGV);
 			return retval;
 		}
 		if (retval != -ENOEXEC || !bprm->file) {
@@ -1825,10 +1826,9 @@ static int __do_execve_file(int fd, struct filename *filename,
 	/* execve succeeded */
 	current->fs->in_exec = 0;
 	current->in_execve = 0;
-	membarrier_execve(current);
 	rseq_execve(current);
 	acct_update_integrals(current);
-	task_numa_free(current);
+	task_numa_free(current, false);
 	free_bprm(bprm);
 	kfree(pathbuf);
 	if (filename)

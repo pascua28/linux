@@ -126,7 +126,7 @@ static inline unsigned long *__vcpu_elr_el1(const struct kvm_vcpu *vcpu)
 static inline unsigned long vcpu_read_elr_el1(const struct kvm_vcpu *vcpu)
 {
 	if (vcpu->arch.sysregs_loaded_on_cpu)
-		return read_sysreg_el1(elr);
+		return read_sysreg_el1(SYS_ELR);
 	else
 		return *__vcpu_elr_el1(vcpu);
 }
@@ -134,7 +134,7 @@ static inline unsigned long vcpu_read_elr_el1(const struct kvm_vcpu *vcpu)
 static inline void vcpu_write_elr_el1(const struct kvm_vcpu *vcpu, unsigned long v)
 {
 	if (vcpu->arch.sysregs_loaded_on_cpu)
-		write_sysreg_el1(v, elr);
+		write_sysreg_el1(v, SYS_ELR);
 	else
 		*__vcpu_elr_el1(vcpu) = v;
 }
@@ -186,7 +186,7 @@ static inline unsigned long vcpu_read_spsr(const struct kvm_vcpu *vcpu)
 		return vcpu_read_spsr32(vcpu);
 
 	if (vcpu->arch.sysregs_loaded_on_cpu)
-		return read_sysreg_el1(spsr);
+		return read_sysreg_el1(SYS_SPSR);
 	else
 		return vcpu_gp_regs(vcpu)->spsr[KVM_SPSR_EL1];
 }
@@ -199,9 +199,41 @@ static inline void vcpu_write_spsr(struct kvm_vcpu *vcpu, unsigned long v)
 	}
 
 	if (vcpu->arch.sysregs_loaded_on_cpu)
-		write_sysreg_el1(v, spsr);
+		write_sysreg_el1(v, SYS_SPSR);
 	else
 		vcpu_gp_regs(vcpu)->spsr[KVM_SPSR_EL1] = v;
+}
+
+/*
+ * The layout of SPSR for an AArch32 state is different when observed from an
+ * AArch64 SPSR_ELx or an AArch32 SPSR_*. This function generates the AArch32
+ * view given an AArch64 view.
+ *
+ * In ARM DDI 0487E.a see:
+ *
+ * - The AArch64 view (SPSR_EL2) in section C5.2.18, page C5-426
+ * - The AArch32 view (SPSR_abt) in section G8.2.126, page G8-6256
+ * - The AArch32 view (SPSR_und) in section G8.2.132, page G8-6280
+ *
+ * Which show the following differences:
+ *
+ * | Bit | AA64 | AA32 | Notes                       |
+ * +-----+------+------+-----------------------------|
+ * | 24  | DIT  | J    | J is RES0 in ARMv8          |
+ * | 21  | SS   | DIT  | SS doesn't exist in AArch32 |
+ *
+ * ... and all other bits are (currently) common.
+ */
+static inline unsigned long host_spsr_to_spsr32(unsigned long spsr)
+{
+	const unsigned long overlap = BIT(24) | BIT(21);
+	unsigned long dit = !!(spsr & PSR_AA32_DIT_BIT);
+
+	spsr &= ~overlap;
+
+	spsr |= dit << 21;
+
+	return spsr;
 }
 
 static inline bool vcpu_mode_priv(const struct kvm_vcpu *vcpu)
@@ -261,6 +293,11 @@ static inline bool kvm_vcpu_dabt_isvalid(const struct kvm_vcpu *vcpu)
 static inline bool kvm_vcpu_dabt_issext(const struct kvm_vcpu *vcpu)
 {
 	return !!(kvm_vcpu_get_hsr(vcpu) & ESR_ELx_SSE);
+}
+
+static inline bool kvm_vcpu_dabt_issf(const struct kvm_vcpu *vcpu)
+{
+	return !!(kvm_vcpu_get_hsr(vcpu) & ESR_ELx_SF);
 }
 
 static inline int kvm_vcpu_dabt_get_rd(const struct kvm_vcpu *vcpu)
@@ -351,6 +388,20 @@ static inline bool kvm_is_write_fault(struct kvm_vcpu *vcpu)
 static inline unsigned long kvm_vcpu_get_mpidr_aff(struct kvm_vcpu *vcpu)
 {
 	return vcpu_read_sys_reg(vcpu, MPIDR_EL1) & MPIDR_HWID_BITMASK;
+}
+
+static inline bool kvm_arm_get_vcpu_workaround_2_flag(struct kvm_vcpu *vcpu)
+{
+	return vcpu->arch.workaround_flags & VCPU_WORKAROUND_2_FLAG;
+}
+
+static inline void kvm_arm_set_vcpu_workaround_2_flag(struct kvm_vcpu *vcpu,
+						      bool flag)
+{
+	if (flag)
+		vcpu->arch.workaround_flags |= VCPU_WORKAROUND_2_FLAG;
+	else
+		vcpu->arch.workaround_flags &= ~VCPU_WORKAROUND_2_FLAG;
 }
 
 static inline void kvm_vcpu_set_be(struct kvm_vcpu *vcpu)
@@ -451,13 +502,13 @@ static inline void kvm_skip_instr(struct kvm_vcpu *vcpu, bool is_wide_instr)
  */
 static inline void __hyp_text __kvm_skip_instr(struct kvm_vcpu *vcpu)
 {
-	*vcpu_pc(vcpu) = read_sysreg_el2(elr);
-	vcpu->arch.ctxt.gp_regs.regs.pstate = read_sysreg_el2(spsr);
+	*vcpu_pc(vcpu) = read_sysreg_el2(SYS_ELR);
+	vcpu->arch.ctxt.gp_regs.regs.pstate = read_sysreg_el2(SYS_SPSR);
 
 	kvm_skip_instr(vcpu, kvm_vcpu_trap_il_is32bit(vcpu));
 
-	write_sysreg_el2(vcpu->arch.ctxt.gp_regs.regs.pstate, spsr);
-	write_sysreg_el2(*vcpu_pc(vcpu), elr);
+	write_sysreg_el2(vcpu->arch.ctxt.gp_regs.regs.pstate, SYS_SPSR);
+	write_sysreg_el2(*vcpu_pc(vcpu), SYS_ELR);
 }
 
 #endif /* __ARM64_KVM_EMULATE_H__ */

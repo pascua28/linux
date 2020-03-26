@@ -22,6 +22,7 @@
 #include "kvm_cache_regs.h"
 #include <asm/kvm_emulate.h>
 #include <linux/stringify.h>
+#include <asm/fpu/api.h>
 #include <asm/debugreg.h>
 #include <asm/nospec-branch.h>
 
@@ -312,29 +313,42 @@ static void invalidate_registers(struct x86_emulate_ctxt *ctxt)
 
 static int fastop(struct x86_emulate_ctxt *ctxt, void (*fop)(struct fastop *));
 
-#define FOP_FUNC(name) \
+#define __FOP_FUNC(name) \
 	".align " __stringify(FASTOP_SIZE) " \n\t" \
 	".type " name ", @function \n\t" \
 	name ":\n\t"
 
-#define FOP_RET   "ret \n\t"
+#define FOP_FUNC(name) \
+	__FOP_FUNC(#name)
+
+#define __FOP_RET(name) \
+	"ret \n\t" \
+	".size " name ", .-" name "\n\t"
+
+#define FOP_RET(name) \
+	__FOP_RET(#name)
 
 #define FOP_START(op) \
 	extern void em_##op(struct fastop *fake); \
 	asm(".pushsection .text, \"ax\" \n\t" \
 	    ".global em_" #op " \n\t" \
-	    FOP_FUNC("em_" #op)
+	    ".align " __stringify(FASTOP_SIZE) " \n\t" \
+	    "em_" #op ":\n\t"
 
 #define FOP_END \
 	    ".popsection")
 
+#define __FOPNOP(name) \
+	__FOP_FUNC(name) \
+	__FOP_RET(name)
+
 #define FOPNOP() \
-	FOP_FUNC(__stringify(__UNIQUE_ID(nop))) \
-	FOP_RET
+	__FOPNOP(__stringify(__UNIQUE_ID(nop)))
 
 #define FOP1E(op,  dst) \
-	FOP_FUNC(#op "_" #dst) \
-	"10: " #op " %" #dst " \n\t" FOP_RET
+	__FOP_FUNC(#op "_" #dst) \
+	"10: " #op " %" #dst " \n\t" \
+	__FOP_RET(#op "_" #dst)
 
 #define FOP1EEX(op,  dst) \
 	FOP1E(op, dst) _ASM_EXTABLE(10b, kvm_fastop_exception)
@@ -366,8 +380,9 @@ static int fastop(struct x86_emulate_ctxt *ctxt, void (*fop)(struct fastop *));
 	FOP_END
 
 #define FOP2E(op,  dst, src)	   \
-	FOP_FUNC(#op "_" #dst "_" #src) \
-	#op " %" #src ", %" #dst " \n\t" FOP_RET
+	__FOP_FUNC(#op "_" #dst "_" #src) \
+	#op " %" #src ", %" #dst " \n\t" \
+	__FOP_RET(#op "_" #dst "_" #src)
 
 #define FASTOP2(op) \
 	FOP_START(op) \
@@ -405,8 +420,9 @@ static int fastop(struct x86_emulate_ctxt *ctxt, void (*fop)(struct fastop *));
 	FOP_END
 
 #define FOP3E(op,  dst, src, src2) \
-	FOP_FUNC(#op "_" #dst "_" #src "_" #src2) \
-	#op " %" #src2 ", %" #src ", %" #dst " \n\t" FOP_RET
+	__FOP_FUNC(#op "_" #dst "_" #src "_" #src2) \
+	#op " %" #src2 ", %" #src ", %" #dst " \n\t"\
+	__FOP_RET(#op "_" #dst "_" #src "_" #src2)
 
 /* 3-operand, word-only, src2=cl */
 #define FASTOP3WCL(op) \
@@ -423,7 +439,7 @@ static int fastop(struct x86_emulate_ctxt *ctxt, void (*fop)(struct fastop *));
 	".type " #op ", @function \n\t" \
 	#op ": \n\t" \
 	#op " %al \n\t" \
-	FOP_RET
+	__FOP_RET(#op)
 
 asm(".pushsection .fixup, \"ax\"\n"
     ".global kvm_fastop_exception \n"
@@ -449,7 +465,10 @@ FOP_SETCC(setle)
 FOP_SETCC(setnle)
 FOP_END;
 
-FOP_START(salc) "pushf; sbb %al, %al; popf \n\t" FOP_RET
+FOP_START(salc)
+FOP_FUNC(salc)
+"pushf; sbb %al, %al; popf \n\t"
+FOP_RET(salc)
 FOP_END;
 
 /*
@@ -1057,8 +1076,23 @@ static void fetch_register_operand(struct operand *op)
 	}
 }
 
+static void emulator_get_fpu(void)
+{
+	fpregs_lock();
+
+	fpregs_assert_state_consistent();
+	if (test_thread_flag(TIF_NEED_FPU_LOAD))
+		switch_fpu_return();
+}
+
+static void emulator_put_fpu(void)
+{
+	fpregs_unlock();
+}
+
 static void read_sse_reg(struct x86_emulate_ctxt *ctxt, sse128_t *data, int reg)
 {
+	emulator_get_fpu();
 	switch (reg) {
 	case 0: asm("movdqa %%xmm0, %0" : "=m"(*data)); break;
 	case 1: asm("movdqa %%xmm1, %0" : "=m"(*data)); break;
@@ -1080,11 +1114,13 @@ static void read_sse_reg(struct x86_emulate_ctxt *ctxt, sse128_t *data, int reg)
 #endif
 	default: BUG();
 	}
+	emulator_put_fpu();
 }
 
 static void write_sse_reg(struct x86_emulate_ctxt *ctxt, sse128_t *data,
 			  int reg)
 {
+	emulator_get_fpu();
 	switch (reg) {
 	case 0: asm("movdqa %0, %%xmm0" : : "m"(*data)); break;
 	case 1: asm("movdqa %0, %%xmm1" : : "m"(*data)); break;
@@ -1106,10 +1142,12 @@ static void write_sse_reg(struct x86_emulate_ctxt *ctxt, sse128_t *data,
 #endif
 	default: BUG();
 	}
+	emulator_put_fpu();
 }
 
 static void read_mmx_reg(struct x86_emulate_ctxt *ctxt, u64 *data, int reg)
 {
+	emulator_get_fpu();
 	switch (reg) {
 	case 0: asm("movq %%mm0, %0" : "=m"(*data)); break;
 	case 1: asm("movq %%mm1, %0" : "=m"(*data)); break;
@@ -1121,10 +1159,12 @@ static void read_mmx_reg(struct x86_emulate_ctxt *ctxt, u64 *data, int reg)
 	case 7: asm("movq %%mm7, %0" : "=m"(*data)); break;
 	default: BUG();
 	}
+	emulator_put_fpu();
 }
 
 static void write_mmx_reg(struct x86_emulate_ctxt *ctxt, u64 *data, int reg)
 {
+	emulator_get_fpu();
 	switch (reg) {
 	case 0: asm("movq %0, %%mm0" : : "m"(*data)); break;
 	case 1: asm("movq %0, %%mm1" : : "m"(*data)); break;
@@ -1136,6 +1176,7 @@ static void write_mmx_reg(struct x86_emulate_ctxt *ctxt, u64 *data, int reg)
 	case 7: asm("movq %0, %%mm7" : : "m"(*data)); break;
 	default: BUG();
 	}
+	emulator_put_fpu();
 }
 
 static int em_fninit(struct x86_emulate_ctxt *ctxt)
@@ -1143,7 +1184,9 @@ static int em_fninit(struct x86_emulate_ctxt *ctxt)
 	if (ctxt->ops->get_cr(ctxt, 0) & (X86_CR0_TS | X86_CR0_EM))
 		return emulate_nm(ctxt);
 
+	emulator_get_fpu();
 	asm volatile("fninit");
+	emulator_put_fpu();
 	return X86EMUL_CONTINUE;
 }
 
@@ -1154,7 +1197,9 @@ static int em_fnstcw(struct x86_emulate_ctxt *ctxt)
 	if (ctxt->ops->get_cr(ctxt, 0) & (X86_CR0_TS | X86_CR0_EM))
 		return emulate_nm(ctxt);
 
+	emulator_get_fpu();
 	asm volatile("fnstcw %0": "+m"(fcw));
+	emulator_put_fpu();
 
 	ctxt->dst.val = fcw;
 
@@ -1168,7 +1213,9 @@ static int em_fnstsw(struct x86_emulate_ctxt *ctxt)
 	if (ctxt->ops->get_cr(ctxt, 0) & (X86_CR0_TS | X86_CR0_EM))
 		return emulate_nm(ctxt);
 
+	emulator_get_fpu();
 	asm volatile("fnstsw %0": "+m"(fsw));
+	emulator_put_fpu();
 
 	ctxt->dst.val = fsw;
 
@@ -4076,7 +4123,11 @@ static int em_fxsave(struct x86_emulate_ctxt *ctxt)
 	if (rc != X86EMUL_CONTINUE)
 		return rc;
 
+	emulator_get_fpu();
+
 	rc = asm_safe("fxsave %[fx]", , [fx] "+m"(fx_state));
+
+	emulator_put_fpu();
 
 	if (rc != X86EMUL_CONTINUE)
 		return rc;
@@ -4120,6 +4171,8 @@ static int em_fxrstor(struct x86_emulate_ctxt *ctxt)
 	if (rc != X86EMUL_CONTINUE)
 		return rc;
 
+	emulator_get_fpu();
+
 	if (size < __fxstate_size(16)) {
 		rc = fxregs_fixup(&fx_state, size);
 		if (rc != X86EMUL_CONTINUE)
@@ -4135,7 +4188,23 @@ static int em_fxrstor(struct x86_emulate_ctxt *ctxt)
 		rc = asm_safe("fxrstor %[fx]", : [fx] "m"(fx_state));
 
 out:
+	emulator_put_fpu();
+
 	return rc;
+}
+
+static int em_xsetbv(struct x86_emulate_ctxt *ctxt)
+{
+	u32 eax, ecx, edx;
+
+	eax = reg_read(ctxt, VCPU_REGS_RAX);
+	edx = reg_read(ctxt, VCPU_REGS_RDX);
+	ecx = reg_read(ctxt, VCPU_REGS_RCX);
+
+	if (ctxt->ops->set_xcr(ctxt, ecx, ((u64)edx << 32) | eax))
+		return emulate_gp(ctxt, 0);
+
+	return X86EMUL_CONTINUE;
 }
 
 static bool valid_cr(int nr)
@@ -4258,7 +4327,7 @@ static int check_dr_read(struct x86_emulate_ctxt *ctxt)
 		ulong dr6;
 
 		ctxt->ops->get_dr(ctxt, 6, &dr6);
-		dr6 &= ~15;
+		dr6 &= ~DR_TRAP_BITS;
 		dr6 |= DR6_BD | DR6_RTM;
 		ctxt->ops->set_dr(ctxt, 6, dr6);
 		return emulate_db(ctxt);
@@ -4391,6 +4460,12 @@ static const struct opcode group7_rm1[] = {
 	N, N, N, N, N, N,
 };
 
+static const struct opcode group7_rm2[] = {
+	N,
+	II(ImplicitOps | Priv,			em_xsetbv,	xsetbv),
+	N, N, N, N, N, N,
+};
+
 static const struct opcode group7_rm3[] = {
 	DIP(SrcNone | Prot | Priv,		vmrun,		check_svme_pa),
 	II(SrcNone  | Prot | EmulateOnUD,	em_hypercall,	vmmcall),
@@ -4480,7 +4555,8 @@ static const struct group_dual group7 = { {
 }, {
 	EXT(0, group7_rm0),
 	EXT(0, group7_rm1),
-	N, EXT(0, group7_rm3),
+	EXT(0, group7_rm2),
+	EXT(0, group7_rm3),
 	II(SrcNone | DstMem | Mov,		em_smsw, smsw), N,
 	II(SrcMem16 | Mov | Priv,		em_lmsw, lmsw),
 	EXT(0, group7_rm7),
@@ -5121,12 +5197,13 @@ int x86_decode_insn(struct x86_emulate_ctxt *ctxt, void *insn, int insn_len)
 	ctxt->fetch.ptr = ctxt->fetch.data;
 	ctxt->fetch.end = ctxt->fetch.data + insn_len;
 	ctxt->opcode_len = 1;
+	ctxt->intercept = x86_intercept_none;
 	if (insn_len > 0)
 		memcpy(ctxt->fetch.data, insn, insn_len);
 	else {
 		rc = __do_insn_fetch_bytes(ctxt, 1);
 		if (rc != X86EMUL_CONTINUE)
-			return rc;
+			goto done;
 	}
 
 	switch (mode) {
@@ -5173,16 +5250,28 @@ int x86_decode_insn(struct x86_emulate_ctxt *ctxt, void *insn, int insn_len)
 				ctxt->ad_bytes = def_ad_bytes ^ 6;
 			break;
 		case 0x26:	/* ES override */
+			has_seg_override = true;
+			ctxt->seg_override = VCPU_SREG_ES;
+			break;
 		case 0x2e:	/* CS override */
+			has_seg_override = true;
+			ctxt->seg_override = VCPU_SREG_CS;
+			break;
 		case 0x36:	/* SS override */
+			has_seg_override = true;
+			ctxt->seg_override = VCPU_SREG_SS;
+			break;
 		case 0x3e:	/* DS override */
 			has_seg_override = true;
-			ctxt->seg_override = (ctxt->b >> 3) & 3;
+			ctxt->seg_override = VCPU_SREG_DS;
 			break;
 		case 0x64:	/* FS override */
+			has_seg_override = true;
+			ctxt->seg_override = VCPU_SREG_FS;
+			break;
 		case 0x65:	/* GS override */
 			has_seg_override = true;
-			ctxt->seg_override = ctxt->b & 7;
+			ctxt->seg_override = VCPU_SREG_GS;
 			break;
 		case 0x40 ... 0x4f: /* REX */
 			if (mode != X86EMUL_MODE_PROT64)
@@ -5266,10 +5355,15 @@ done_prefixes:
 			}
 			break;
 		case Escape:
-			if (ctxt->modrm > 0xbf)
-				opcode = opcode.u.esc->high[ctxt->modrm - 0xc0];
-			else
+			if (ctxt->modrm > 0xbf) {
+				size_t size = ARRAY_SIZE(opcode.u.esc->high);
+				u32 index = array_index_nospec(
+					ctxt->modrm - 0xc0, size);
+
+				opcode = opcode.u.esc->high[index];
+			} else {
 				opcode = opcode.u.esc->op[(ctxt->modrm >> 3) & 7];
+			}
 			break;
 		case InstrDual:
 			if ((ctxt->modrm >> 6) == 3)
@@ -5377,6 +5471,8 @@ done_prefixes:
 					ctxt->memopp->addr.mem.ea + ctxt->_eip);
 
 done:
+	if (rc == X86EMUL_PROPAGATE_FAULT)
+		ctxt->have_exception = true;
 	return (rc != X86EMUL_CONTINUE) ? EMULATION_FAILED : EMULATION_OK;
 }
 
@@ -5409,7 +5505,9 @@ static int flush_pending_x87_faults(struct x86_emulate_ctxt *ctxt)
 {
 	int rc;
 
+	emulator_get_fpu();
 	rc = asm_safe("fwait");
+	emulator_put_fpu();
 
 	if (unlikely(rc != X86EMUL_CONTINUE))
 		return emulate_exception(ctxt, MF_VECTOR, 0, false);

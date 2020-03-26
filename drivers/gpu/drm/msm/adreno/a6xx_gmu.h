@@ -12,8 +12,8 @@
 struct a6xx_gmu_bo {
 	void *virt;
 	size_t size;
-	u64 iova;
-	struct page **pages;
+	dma_addr_t iova;
+	unsigned long attrs;
 };
 
 /*
@@ -49,9 +49,6 @@ struct a6xx_gmu {
 	int hfi_irq;
 	int gmu_irq;
 
-	struct iommu_domain *domain;
-	u64 uncached_iova_base;
-
 	struct device *gxpd;
 
 	int idle_level;
@@ -75,6 +72,7 @@ struct a6xx_gmu {
 
 	struct a6xx_hfi_queue queues[2];
 
+	bool initialized;
 	bool hung;
 };
 

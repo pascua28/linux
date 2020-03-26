@@ -240,6 +240,7 @@ config RTC_DRV_AS3722
 
 config RTC_DRV_DS1307
 	tristate "Dallas/Maxim DS1307/37/38/39/40/41, ST M41T00, EPSON RX-8025, ISL12057"
+	select REGMAP_I2C
 	help
 	  If you say yes here you get support for various compatible RTC
 	  chips (often with battery backup) connected with I2C. This driver
@@ -373,12 +374,23 @@ config RTC_DRV_MAX77686
 	  This driver can also be built as a module. If so, the module
 	  will be called rtc-max77686.
 
+config RTC_DRV_MESON_VRTC
+	tristate "Amlogic Meson Virtual RTC"
+	depends on ARCH_MESON || COMPILE_TEST
+	default m if ARCH_MESON
+	help
+	  If you say yes here you will get support for the
+	  Virtual RTC of Amlogic SoCs.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called rtc-meson-vrtc.
+
 config RTC_DRV_RK808
-	tristate "Rockchip RK805/RK808/RK818 RTC"
+	tristate "Rockchip RK805/RK808/RK809/RK817/RK818 RTC"
 	depends on MFD_RK808
 	help
 	  If you say yes here you will get support for the
-	  RTC of RK805, RK808 and RK818 PMIC.
+	  RTC of RK805, RK809 and RK817, RK808 and RK818 PMIC.
 
 	  This driver can also be built as a module. If so, the module
 	  will be called rk808-rtc.
@@ -498,6 +510,15 @@ config RTC_DRV_M41T80_WDT
 	help
 	  If you say Y here you will get support for the
 	  watchdog timer in the ST M41T60 and M41T80 RTC chips series.
+config RTC_DRV_BD70528
+	tristate "ROHM BD70528 PMIC RTC"
+	depends on MFD_ROHM_BD70528 && (BD70528_WATCHDOG || !BD70528_WATCHDOG)
+	help
+	  If you say Y here you will get support for the RTC
+	  on ROHM BD70528 Power Management IC.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called rtc-bd70528.
 
 config RTC_DRV_BQ32K
 	tristate "TI BQ32000"
@@ -554,7 +575,7 @@ config RTC_DRV_TPS6586X
 
 config RTC_DRV_TPS65910
 	tristate "TI TPS65910 RTC driver"
-	depends on RTC_CLASS && MFD_TPS65910
+	depends on MFD_TPS65910
 	help
 	  If you say yes here you get support for the RTC on the
 	  TPS65910 chips.
@@ -612,6 +633,7 @@ config RTC_DRV_RX8010
 
 config RTC_DRV_RX8581
 	tristate "Epson RX-8571/RX-8581"
+	select REGMAP_I2C
 	help
 	  If you say yes here you will get support for the Epson RX-8571/
 	  RX-8581.
@@ -639,6 +661,7 @@ config RTC_DRV_EM3027
 
 config RTC_DRV_RV3028
 	tristate "Micro Crystal RV3028"
+	select REGMAP_I2C
 	help
 	  If you say yes here you get support for the Micro Crystal
 	  RV3028.
@@ -668,6 +691,7 @@ config RTC_DRV_S5M
 
 config RTC_DRV_SD3078
     tristate "ZXW Shenzhen whwave SD3078"
+    select REGMAP_I2C
     help
       If you say yes here you get support for the ZXW Shenzhen whwave
       SD3078 RTC chips.
@@ -812,6 +836,7 @@ config RTC_DRV_MAX6902
 
 config RTC_DRV_PCF2123
 	tristate "NXP PCF2123"
+	select REGMAP_SPI
 	help
 	  If you say yes here you get support for the NXP PCF2123
 	  RTC chip.
@@ -838,14 +863,14 @@ config RTC_I2C_AND_SPI
 	default m if I2C=m
 	default y if I2C=y
 	default y if SPI_MASTER=y
-	select REGMAP_I2C if I2C
-	select REGMAP_SPI if SPI_MASTER
 
 comment "SPI and I2C RTC drivers"
 
 config RTC_DRV_DS3232
 	tristate "Dallas/Maxim DS3232/DS3234"
 	depends on RTC_I2C_AND_SPI
+	select REGMAP_I2C if I2C
+	select REGMAP_SPI if SPI_MASTER
 	help
 	  If you say yes here you get support for Dallas Semiconductor
 	  DS3232 and DS3234 real-time clock chips. If an interrupt is associated
@@ -865,9 +890,17 @@ config RTC_DRV_DS3232_HWMON
 config RTC_DRV_PCF2127
 	tristate "NXP PCF2127"
 	depends on RTC_I2C_AND_SPI
+	select REGMAP_I2C if I2C
+	select REGMAP_SPI if SPI_MASTER
+	select WATCHDOG_CORE if WATCHDOG
 	help
 	  If you say yes here you get support for the NXP PCF2127/29 RTC
-	  chips.
+	  chips with integrated quartz crystal for industrial applications.
+	  Both chips also have watchdog timer and tamper switch detection
+	  features.
+
+	  PCF2127 has an additional feature of 512 bytes battery backed
+	  memory that's accessible using nvmem interface.
 
 	  This driver can also be built as a module. If so, the module
 	  will be called rtc-pcf2127.
@@ -875,6 +908,8 @@ config RTC_DRV_PCF2127
 config RTC_DRV_RV3029C2
 	tristate "Micro Crystal RV3029/3049"
 	depends on RTC_I2C_AND_SPI
+	select REGMAP_I2C if I2C
+	select REGMAP_SPI if SPI_MASTER
 	help
 	  If you say yes here you get support for the Micro Crystal
 	  RV3029 and RV3049 RTC chips.
@@ -1238,13 +1273,6 @@ config RTC_DRV_AB8500
 	  Select this to enable the ST-Ericsson AB8500 power management IC RTC
 	  support. This chip contains a battery- and capacitor-backed RTC.
 
-config RTC_DRV_NUC900
-	tristate "NUC910/NUC920 RTC driver"
-	depends on ARCH_W90X900 || COMPILE_TEST
-	help
-	  If you say yes here you get support for the RTC subsystem of the
-	  NUC910/NUC920 used in embedded systems.
-
 config RTC_DRV_OPAL
 	tristate "IBM OPAL RTC driver"
 	depends on PPC_POWERNV
@@ -1265,7 +1293,7 @@ config RTC_DRV_ZYNQMP
 
 config RTC_DRV_CROS_EC
 	tristate "Chrome OS EC RTC driver"
-	depends on MFD_CROS_EC
+	depends on CROS_EC
 	help
 	  If you say yes here you will get support for the
 	  Chrome OS Embedded Controller's RTC.
@@ -1313,6 +1341,21 @@ config RTC_DRV_IMXDI
 
 	   This driver can also be built as a module, if so, the module
 	   will be called "rtc-imxdi".
+
+config RTC_DRV_FSL_FTM_ALARM
+	tristate "Freescale FlexTimer alarm timer"
+	depends on ARCH_LAYERSCAPE || SOC_LS1021A
+	select FSL_RCPM
+	default y
+	help
+	   For the FlexTimer in LS1012A, LS1021A, LS1028A, LS1043A, LS1046A,
+	   LS1088A, LS208xA, we can use FTM as the wakeup source.
+
+	   Say y here to enable FTM alarm support. The FTM alarm provides
+	   alarm functions for wakeup system from deep sleep.
+
+	   This driver can also be built as a module, if so, the module
+	   will be called "rtc-fsl-ftm-alarm".
 
 config RTC_DRV_MESON
 	tristate "Amlogic Meson RTC"

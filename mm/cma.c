@@ -24,6 +24,7 @@
 #include <linux/memblock.h>
 #include <linux/err.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
@@ -54,6 +55,7 @@ const char *cma_get_name(const struct cma *cma)
 {
 	return cma->name ? cma->name : "(undefined)";
 }
+EXPORT_SYMBOL_GPL(cma_get_name);
 
 static unsigned long cma_bitmap_aligned_mask(const struct cma *cma,
 					     unsigned int align_order)
@@ -278,6 +280,12 @@ int __init cma_declare_contiguous(phys_addr_t base,
 	 */
 	alignment = max(alignment,  (phys_addr_t)PAGE_SIZE <<
 			  max_t(unsigned long, MAX_ORDER - 1, pageblock_order));
+	if (fixed && base & (alignment - 1)) {
+		ret = -EINVAL;
+		pr_err("Region at %pa must be aligned to %pa bytes\n",
+			&base, &alignment);
+		goto err;
+	}
 	base = ALIGN(base, alignment);
 	size = ALIGN(size, alignment);
 	limit &= ~(alignment - 1);
@@ -307,6 +315,13 @@ int __init cma_declare_contiguous(phys_addr_t base,
 	 */
 	if (limit == 0 || limit > memblock_end)
 		limit = memblock_end;
+
+	if (base + size > limit) {
+		ret = -EINVAL;
+		pr_err("Size (%pa) of region at %pa exceeds limit (%pa)\n",
+			&size, &base, &limit);
+		goto err;
+	}
 
 	/* Reserve memory */
 	if (fixed) {
@@ -487,6 +502,7 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 	pr_debug("%s(): returned %p\n", __func__, page);
 	return page;
 }
+EXPORT_SYMBOL_GPL(cma_alloc);
 
 /**
  * cma_release() - release allocated pages
@@ -494,7 +510,7 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
  * @pages: Allocated pages.
  * @count: Number of allocated pages.
  *
- * This function releases memory allocated by alloc_cma().
+ * This function releases memory allocated by cma_alloc().
  * It returns false when provided pages do not belong to contiguous area and
  * true otherwise.
  */
@@ -520,6 +536,7 @@ bool cma_release(struct cma *cma, const struct page *pages, unsigned int count)
 
 	return true;
 }
+EXPORT_SYMBOL_GPL(cma_release);
 
 int cma_for_each_area(int (*it)(struct cma *cma, void *data), void *data)
 {
@@ -534,3 +551,4 @@ int cma_for_each_area(int (*it)(struct cma *cma, void *data), void *data)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(cma_for_each_area);

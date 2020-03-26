@@ -67,8 +67,6 @@ source "net/xdp/Kconfig"
 
 config INET
 	bool "TCP/IP networking"
-	select CRYPTO
-	select CRYPTO_AES
 	---help---
 	  These are the protocols used on the Internet and on most local
 	  Ethernets. It is highly recommended to say Y here (this will enlarge
@@ -189,7 +187,6 @@ config BRIDGE_NETFILTER
 	depends on NETFILTER_ADVANCED
 	select NETFILTER_FAMILY_BRIDGE
 	select SKB_EXTENSIONS
-	default m
 	---help---
 	  Enabling this option will let arptables resp. iptables see bridged
 	  ARP resp. IP traffic. If you want a bridging firewall, you probably
@@ -432,6 +429,7 @@ config NET_SOCK_MSG
 config NET_DEVLINK
 	bool
 	default n
+	imply NET_DROP_MONITOR
 
 config PAGE_POOL
        bool

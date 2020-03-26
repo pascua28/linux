@@ -8,11 +8,11 @@
  * keysize in CBC and ECB mode.
  * Add support also for DES and 3DES in CBC and ECB mode.
  *
- * You could find the datasheet in Documentation/arm/sunxi/README
+ * You could find the datasheet in Documentation/arm/sunxi.rst
  */
 #include "sun4i-ss.h"
 
-static int sun4i_ss_opti_poll(struct skcipher_request *areq)
+static int noinline_for_stack sun4i_ss_opti_poll(struct skcipher_request *areq)
 {
 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(areq);
 	struct sun4i_tfm_ctx *op = crypto_skcipher_ctx(tfm);
@@ -72,7 +72,8 @@ static int sun4i_ss_opti_poll(struct skcipher_request *areq)
 	oi = 0;
 	oo = 0;
 	do {
-		todo = min3(rx_cnt, ileft, (mi.length - oi) / 4);
+		todo = min(rx_cnt, ileft);
+		todo = min_t(size_t, todo, (mi.length - oi) / 4);
 		if (todo) {
 			ileft -= todo;
 			writesl(ss->base + SS_RXFIFO, mi.addr + oi, todo);
@@ -87,7 +88,8 @@ static int sun4i_ss_opti_poll(struct skcipher_request *areq)
 		rx_cnt = SS_RXFIFO_SPACES(spaces);
 		tx_cnt = SS_TXFIFO_SPACES(spaces);
 
-		todo = min3(tx_cnt, oleft, (mo.length - oo) / 4);
+		todo = min(tx_cnt, oleft);
+		todo = min_t(size_t, todo, (mo.length - oo) / 4);
 		if (todo) {
 			oleft -= todo;
 			readsl(ss->base + SS_TXFIFO, mo.addr + oo, todo);
@@ -111,6 +113,29 @@ release_ss:
 	sg_miter_stop(&mo);
 	writel(0, ss->base + SS_CTL);
 	spin_unlock_irqrestore(&ss->slock, flags);
+	return err;
+}
+
+
+static int noinline_for_stack sun4i_ss_cipher_poll_fallback(struct skcipher_request *areq)
+{
+	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(areq);
+	struct sun4i_tfm_ctx *op = crypto_skcipher_ctx(tfm);
+	struct sun4i_cipher_req_ctx *ctx = skcipher_request_ctx(areq);
+	SYNC_SKCIPHER_REQUEST_ON_STACK(subreq, op->fallback_tfm);
+	int err;
+
+	skcipher_request_set_sync_tfm(subreq, op->fallback_tfm);
+	skcipher_request_set_callback(subreq, areq->base.flags, NULL,
+				      NULL);
+	skcipher_request_set_crypt(subreq, areq->src, areq->dst,
+				   areq->cryptlen, areq->iv);
+	if (ctx->mode & SS_DECRYPTION)
+		err = crypto_skcipher_decrypt(subreq);
+	else
+		err = crypto_skcipher_encrypt(subreq);
+	skcipher_request_zero(subreq);
+
 	return err;
 }
 
@@ -140,8 +165,6 @@ static int sun4i_ss_cipher_poll(struct skcipher_request *areq)
 	unsigned int todo;
 	struct sg_mapping_iter mi, mo;
 	unsigned int oi, oo;	/* offset for in and out */
-	char buf[4 * SS_RX_MAX];/* buffer for linearize SG src */
-	char bufo[4 * SS_TX_MAX]; /* buffer for linearize SG dst */
 	unsigned int ob = 0;	/* offset in buf */
 	unsigned int obo = 0;	/* offset in bufo*/
 	unsigned int obl = 0;	/* length of data in bufo */
@@ -178,20 +201,8 @@ static int sun4i_ss_cipher_poll(struct skcipher_request *areq)
 	if (no_chunk == 1 && !need_fallback)
 		return sun4i_ss_opti_poll(areq);
 
-	if (need_fallback) {
-		SYNC_SKCIPHER_REQUEST_ON_STACK(subreq, op->fallback_tfm);
-		skcipher_request_set_sync_tfm(subreq, op->fallback_tfm);
-		skcipher_request_set_callback(subreq, areq->base.flags, NULL,
-					      NULL);
-		skcipher_request_set_crypt(subreq, areq->src, areq->dst,
-					   areq->cryptlen, areq->iv);
-		if (ctx->mode & SS_DECRYPTION)
-			err = crypto_skcipher_decrypt(subreq);
-		else
-			err = crypto_skcipher_encrypt(subreq);
-		skcipher_request_zero(subreq);
-		return err;
-	}
+	if (need_fallback)
+		return sun4i_ss_cipher_poll_fallback(areq);
 
 	spin_lock_irqsave(&ss->slock, flags);
 
@@ -224,11 +235,14 @@ static int sun4i_ss_cipher_poll(struct skcipher_request *areq)
 
 	while (oleft) {
 		if (ileft) {
+			char buf[4 * SS_RX_MAX];/* buffer for linearize SG src */
+
 			/*
 			 * todo is the number of consecutive 4byte word that we
 			 * can read from current SG
 			 */
-			todo = min3(rx_cnt, ileft / 4, (mi.length - oi) / 4);
+			todo = min(rx_cnt, ileft / 4);
+			todo = min_t(size_t, todo, (mi.length - oi) / 4);
 			if (todo && !ob) {
 				writesl(ss->base + SS_RXFIFO, mi.addr + oi,
 					todo);
@@ -242,8 +256,8 @@ static int sun4i_ss_cipher_poll(struct skcipher_request *areq)
 				 * we need to be able to write all buf in one
 				 * pass, so it is why we min() with rx_cnt
 				 */
-				todo = min3(rx_cnt * 4 - ob, ileft,
-					    mi.length - oi);
+				todo = min(rx_cnt * 4 - ob, ileft);
+				todo = min_t(size_t, todo, mi.length - oi);
 				memcpy(buf + ob, mi.addr + oi, todo);
 				ileft -= todo;
 				oi += todo;
@@ -263,7 +277,8 @@ static int sun4i_ss_cipher_poll(struct skcipher_request *areq)
 		spaces = readl(ss->base + SS_FCSR);
 		rx_cnt = SS_RXFIFO_SPACES(spaces);
 		tx_cnt = SS_TXFIFO_SPACES(spaces);
-		dev_dbg(ss->dev, "%x %u/%u %u/%u cnt=%u %u/%u %u/%u cnt=%u %u\n",
+		dev_dbg(ss->dev,
+			"%x %u/%zu %u/%u cnt=%u %u/%zu %u/%u cnt=%u %u\n",
 			mode,
 			oi, mi.length, ileft, areq->cryptlen, rx_cnt,
 			oo, mo.length, oleft, areq->cryptlen, tx_cnt, ob);
@@ -271,7 +286,8 @@ static int sun4i_ss_cipher_poll(struct skcipher_request *areq)
 		if (!tx_cnt)
 			continue;
 		/* todo in 4bytes word */
-		todo = min3(tx_cnt, oleft / 4, (mo.length - oo) / 4);
+		todo = min(tx_cnt, oleft / 4);
+		todo = min_t(size_t, todo, (mo.length - oo) / 4);
 		if (todo) {
 			readsl(ss->base + SS_TXFIFO, mo.addr + oo, todo);
 			oleft -= todo * 4;
@@ -281,6 +297,8 @@ static int sun4i_ss_cipher_poll(struct skcipher_request *areq)
 				oo = 0;
 			}
 		} else {
+			char bufo[4 * SS_TX_MAX]; /* buffer for linearize SG dst */
+
 			/*
 			 * read obl bytes in bufo, we read at maximum for
 			 * emptying the device
@@ -295,7 +313,8 @@ static int sun4i_ss_cipher_poll(struct skcipher_request *areq)
 				 * no more than remaining buffer
 				 * no need to test against oleft
 				 */
-				todo = min(mo.length - oo, obl - obo);
+				todo = min_t(size_t,
+					     mo.length - oo, obl - obo);
 				memcpy(mo.addr + oo, bufo + obo, todo);
 				oleft -= todo;
 				obo += todo;
@@ -529,25 +548,11 @@ int sun4i_ss_des_setkey(struct crypto_skcipher *tfm, const u8 *key,
 			unsigned int keylen)
 {
 	struct sun4i_tfm_ctx *op = crypto_skcipher_ctx(tfm);
-	struct sun4i_ss_ctx *ss = op->ss;
-	u32 flags;
-	u32 tmp[DES_EXPKEY_WORDS];
-	int ret;
+	int err;
 
-	if (unlikely(keylen != DES_KEY_SIZE)) {
-		dev_err(ss->dev, "Invalid keylen %u\n", keylen);
-		crypto_skcipher_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_LEN);
-		return -EINVAL;
-	}
-
-	flags = crypto_skcipher_get_flags(tfm);
-
-	ret = des_ekey(tmp, key);
-	if (unlikely(!ret) && (flags & CRYPTO_TFM_REQ_FORBID_WEAK_KEYS)) {
-		crypto_skcipher_set_flags(tfm, CRYPTO_TFM_RES_WEAK_KEY);
-		dev_dbg(ss->dev, "Weak key %u\n", keylen);
-		return -EINVAL;
-	}
+	err = verify_skcipher_des_key(tfm, key);
+	if (err)
+		return err;
 
 	op->keylen = keylen;
 	memcpy(op->key, key, keylen);
@@ -565,8 +570,8 @@ int sun4i_ss_des3_setkey(struct crypto_skcipher *tfm, const u8 *key,
 	struct sun4i_tfm_ctx *op = crypto_skcipher_ctx(tfm);
 	int err;
 
-	err = des3_verify_key(tfm, key);
-	if (unlikely(err))
+	err = verify_skcipher_des3_key(tfm, key);
+	if (err)
 		return err;
 
 	op->keylen = keylen;

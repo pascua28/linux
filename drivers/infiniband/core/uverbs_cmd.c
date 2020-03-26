@@ -252,9 +252,6 @@ static int ib_uverbs_get_context(struct uverbs_attr_bundle *attrs)
 	ucontext->closing = false;
 	ucontext->cleanup_retryable = false;
 
-	mutex_init(&ucontext->per_mm_list_lock);
-	INIT_LIST_HEAD(&ucontext->per_mm_list);
-
 	ret = get_unused_fd_flags(O_CLOEXEC);
 	if (ret < 0)
 		goto err_free;
@@ -275,8 +272,6 @@ static int ib_uverbs_get_context(struct uverbs_attr_bundle *attrs)
 	ret = ib_dev->ops.alloc_ucontext(ucontext, &attrs->driver_udata);
 	if (ret)
 		goto err_file;
-	if (!(ib_dev->attrs.device_cap_flags & IB_DEVICE_ON_DEMAND_PAGING))
-		ucontext->invalidate_range = NULL;
 
 	rdma_restrack_uadd(&ucontext->res);
 
@@ -756,7 +751,9 @@ static int ib_uverbs_reg_mr(struct uverbs_attr_bundle *attrs)
 
 	mr->device  = pd->device;
 	mr->pd      = pd;
+	mr->type    = IB_MR_TYPE_USER;
 	mr->dm	    = NULL;
+	mr->sig_attrs = NULL;
 	mr->uobject = uobj;
 	atomic_inc(&pd->usecnt);
 	mr->res.type = RDMA_RESTRACK_MR;
@@ -1021,18 +1018,21 @@ static struct ib_ucq_object *create_cq(struct uverbs_attr_bundle *attrs,
 	attr.comp_vector = cmd->comp_vector;
 	attr.flags = cmd->flags;
 
-	cq = ib_dev->ops.create_cq(ib_dev, &attr, &attrs->driver_udata);
-	if (IS_ERR(cq)) {
-		ret = PTR_ERR(cq);
+	cq = rdma_zalloc_drv_obj(ib_dev, ib_cq);
+	if (!cq) {
+		ret = -ENOMEM;
 		goto err_file;
 	}
-
 	cq->device        = ib_dev;
 	cq->uobject       = &obj->uobject;
 	cq->comp_handler  = ib_uverbs_comp_handler;
 	cq->event_handler = ib_uverbs_cq_event_handler;
 	cq->cq_context    = ev_file ? &ev_file->ev_queue : NULL;
 	atomic_set(&cq->usecnt, 0);
+
+	ret = ib_dev->ops.create_cq(cq, &attr, &attrs->driver_udata);
+	if (ret)
+		goto err_free;
 
 	obj->uobject.object = cq;
 	memset(&resp, 0, sizeof resp);
@@ -1054,7 +1054,9 @@ static struct ib_ucq_object *create_cq(struct uverbs_attr_bundle *attrs,
 
 err_cb:
 	ib_destroy_cq_user(cq, uverbs_get_cleared_udata(attrs));
-
+	cq = NULL;
+err_free:
+	kfree(cq);
 err_file:
 	if (ev_file)
 		ib_uverbs_release_ucq(attrs->ufile, ev_file, obj);
@@ -1429,17 +1431,7 @@ static int create_qp(struct uverbs_attr_bundle *attrs,
 		if (ret)
 			goto err_cb;
 
-		qp->pd		  = pd;
-		qp->send_cq	  = attr.send_cq;
-		qp->recv_cq	  = attr.recv_cq;
-		qp->srq		  = attr.srq;
-		qp->rwq_ind_tbl	  = ind_tbl;
-		qp->event_handler = attr.event_handler;
-		qp->qp_context	  = attr.qp_context;
-		qp->qp_type	  = attr.qp_type;
-		atomic_set(&qp->usecnt, 0);
 		atomic_inc(&pd->usecnt);
-		qp->port = 0;
 		if (attr.send_cq)
 			atomic_inc(&attr.send_cq->usecnt);
 		if (attr.recv_cq)
@@ -2541,7 +2533,7 @@ static int ib_uverbs_detach_mcast(struct uverbs_attr_bundle *attrs)
 	struct ib_uqp_object         *obj;
 	struct ib_qp                 *qp;
 	struct ib_uverbs_mcast_entry *mcast;
-	int                           ret = -EINVAL;
+	int                           ret;
 	bool                          found = false;
 
 	ret = uverbs_request(attrs, &cmd, sizeof(cmd));
@@ -2716,12 +2708,6 @@ static int kern_spec_to_ib_spec_action(struct uverbs_attr_bundle *attrs,
 	return 0;
 }
 
-static size_t kern_spec_filter_sz(const struct ib_uverbs_flow_spec_hdr *spec)
-{
-	/* Returns user space filter size, includes padding */
-	return (spec->size - sizeof(struct ib_uverbs_flow_spec_hdr)) / 2;
-}
-
 static ssize_t spec_filter_size(const void *kern_spec_filter, u16 kern_filter_size,
 				u16 ib_real_filter_sz)
 {
@@ -2865,11 +2851,16 @@ int ib_uverbs_kern_spec_to_ib_spec_filter(enum ib_flow_spec_type type,
 static int kern_spec_to_ib_spec_filter(struct ib_uverbs_flow_spec *kern_spec,
 				       union ib_flow_spec *ib_spec)
 {
-	ssize_t kern_filter_sz;
+	size_t kern_filter_sz;
 	void *kern_spec_mask;
 	void *kern_spec_val;
 
-	kern_filter_sz = kern_spec_filter_sz(&kern_spec->hdr);
+	if (check_sub_overflow((size_t)kern_spec->hdr.size,
+			       sizeof(struct ib_uverbs_flow_spec_hdr),
+			       &kern_filter_sz))
+		return -EINVAL;
+
+	kern_filter_sz /= 2;
 
 	kern_spec_val = (void *)kern_spec +
 		sizeof(struct ib_uverbs_flow_spec_hdr);
@@ -3477,7 +3468,8 @@ static int __uverbs_create_xsrq(struct uverbs_attr_bundle *attrs,
 
 err_copy:
 	ib_destroy_srq_user(srq, uverbs_get_cleared_udata(attrs));
-
+	/* It was released in ib_destroy_srq_user */
+	srq = NULL;
 err_free:
 	kfree(srq);
 err_put:
@@ -3715,9 +3707,6 @@ static int ib_uverbs_ex_modify_cq(struct uverbs_attr_bundle *attrs)
  * trailing driver_data flex array. In this case the size of the base struct
  * cannot be changed.
  */
-#define offsetof_after(_struct, _member)                                       \
-	(offsetof(_struct, _member) + sizeof(((_struct *)NULL)->_member))
-
 #define UAPI_DEF_WRITE_IO(req, resp)                                           \
 	.write.has_resp = 1 +                                                  \
 			  BUILD_BUG_ON_ZERO(offsetof(req, response) != 0) +    \
@@ -3748,11 +3737,11 @@ static int ib_uverbs_ex_modify_cq(struct uverbs_attr_bundle *attrs)
  */
 #define UAPI_DEF_WRITE_IO_EX(req, req_last_member, resp, resp_last_member)     \
 	.write.has_resp = 1,                                                   \
-	.write.req_size = offsetof_after(req, req_last_member),                \
-	.write.resp_size = offsetof_after(resp, resp_last_member)
+	.write.req_size = offsetofend(req, req_last_member),                   \
+	.write.resp_size = offsetofend(resp, resp_last_member)
 
 #define UAPI_DEF_WRITE_I_EX(req, req_last_member)                              \
-	.write.req_size = offsetof_after(req, req_last_member)
+	.write.req_size = offsetofend(req, req_last_member)
 
 const struct uapi_definition uverbs_def_write_intf[] = {
 	DECLARE_UVERBS_OBJECT(

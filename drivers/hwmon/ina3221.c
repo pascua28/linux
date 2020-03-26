@@ -170,7 +170,7 @@ static inline int ina3221_wait_for_data(struct ina3221_data *ina)
 
 	/* Polling the CVRF bit to make sure read data is ready */
 	return regmap_field_read_poll_timeout(ina->fields[F_CVRF],
-					      cvrf, cvrf, wait, 100000);
+					      cvrf, cvrf, wait, wait * 2);
 }
 
 static int ina3221_read_value(struct ina3221_data *ina, unsigned int reg,
@@ -713,8 +713,10 @@ static int ina3221_probe_from_dt(struct device *dev, struct ina3221_data *ina)
 
 	for_each_child_of_node(np, child) {
 		ret = ina3221_probe_child_from_dt(dev, child, ina);
-		if (ret)
+		if (ret) {
+			of_node_put(child);
 			return ret;
+		}
 	}
 
 	return 0;

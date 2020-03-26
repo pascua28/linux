@@ -3208,7 +3208,7 @@ static void e1000_configure_rx(struct e1000_adapter *adapter)
 	if (!(adapter->flags2 & FLAG2_NO_DISABLE_RX))
 		ew32(RCTL, rctl & ~E1000_RCTL_EN);
 	e1e_flush();
-	usleep_range(10000, 20000);
+	usleep_range(10000, 11000);
 
 	if (adapter->flags2 & FLAG2_DMA_BURST) {
 		/* set the writeback threshold (only takes effect if the RDTR
@@ -4046,12 +4046,12 @@ void e1000e_reset(struct e1000_adapter *adapter)
 	case e1000_pch_lpt:
 	case e1000_pch_spt:
 	case e1000_pch_cnp:
-		fc->refresh_time = 0x0400;
+		fc->refresh_time = 0xFFFF;
+		fc->pause_time = 0xFFFF;
 
 		if (adapter->netdev->mtu <= ETH_DATA_LEN) {
 			fc->high_water = 0x05C20;
 			fc->low_water = 0x05048;
-			fc->pause_time = 0x0650;
 			break;
 		}
 
@@ -4208,7 +4208,7 @@ void e1000e_up(struct e1000_adapter *adapter)
 		e1000_configure_msix(adapter);
 	e1000_irq_enable(adapter);
 
-	netif_start_queue(adapter->netdev);
+	/* Tx queue started by watchdog timer when link is up */
 
 	e1000e_trigger_lsc(adapter);
 }
@@ -4272,7 +4272,7 @@ void e1000e_down(struct e1000_adapter *adapter, bool reset)
 
 	/* flush both disables and wait for them to finish */
 	e1e_flush();
-	usleep_range(10000, 20000);
+	usleep_range(10000, 11000);
 
 	e1000_irq_disable(adapter);
 
@@ -4310,7 +4310,7 @@ void e1000e_reinit_locked(struct e1000_adapter *adapter)
 {
 	might_sleep();
 	while (test_and_set_bit(__E1000_RESETTING, &adapter->state))
-		usleep_range(1000, 2000);
+		usleep_range(1000, 1100);
 	e1000e_down(adapter, true);
 	e1000e_up(adapter);
 	clear_bit(__E1000_RESETTING, &adapter->state);
@@ -4606,6 +4606,7 @@ int e1000e_open(struct net_device *netdev)
 	pm_runtime_get_sync(&pdev->dev);
 
 	netif_carrier_off(netdev);
+	netif_stop_queue(netdev);
 
 	/* allocate transmit descriptors */
 	err = e1000e_setup_tx_resources(adapter->tx_ring);
@@ -4666,7 +4667,6 @@ int e1000e_open(struct net_device *netdev)
 	e1000_irq_enable(adapter);
 
 	adapter->tx_hang_recheck = false;
-	netif_start_queue(netdev);
 
 	hw->mac.get_link_status = true;
 	pm_runtime_put(&pdev->dev);
@@ -4707,18 +4707,18 @@ int e1000e_close(struct net_device *netdev)
 	int count = E1000_CHECK_RESET_COUNT;
 
 	while (test_bit(__E1000_RESETTING, &adapter->state) && count--)
-		usleep_range(10000, 20000);
+		usleep_range(10000, 11000);
 
 	WARN_ON(test_bit(__E1000_RESETTING, &adapter->state));
 
 	pm_runtime_get_sync(&pdev->dev);
 
-	if (!test_bit(__E1000_DOWN, &adapter->state)) {
+	if (netif_device_present(netdev)) {
 		e1000e_down(adapter, true);
 		e1000_free_irq(adapter);
 
 		/* Link status message must follow this format */
-		pr_info("%s NIC Link is Down\n", adapter->netdev->name);
+		pr_info("%s NIC Link is Down\n", netdev->name);
 	}
 
 	napi_disable(&adapter->napi);
@@ -5173,8 +5173,9 @@ static void e1000_watchdog_task(struct work_struct *work)
 	struct e1000_mac_info *mac = &adapter->hw.mac;
 	struct e1000_phy_info *phy = &adapter->hw.phy;
 	struct e1000_ring *tx_ring = adapter->tx_ring;
+	u32 dmoff_exit_timeout = 100, tries = 0;
 	struct e1000_hw *hw = &adapter->hw;
-	u32 link, tctl;
+	u32 link, tctl, pcim_state;
 
 	if (test_bit(__E1000_DOWN, &adapter->state))
 		return;
@@ -5198,6 +5199,21 @@ static void e1000_watchdog_task(struct work_struct *work)
 
 			/* Cancel scheduled suspend requests. */
 			pm_runtime_resume(netdev->dev.parent);
+
+			/* Checking if MAC is in DMoff state*/
+			pcim_state = er32(STATUS);
+			while (pcim_state & E1000_STATUS_PCIM_STATE) {
+				if (tries++ == dmoff_exit_timeout) {
+					e_dbg("Error in exiting dmoff\n");
+					break;
+				}
+				usleep_range(10000, 20000);
+				pcim_state = er32(STATUS);
+
+				/* Checking if MAC exited DMoff state */
+				if (!(pcim_state & E1000_STATUS_PCIM_STATE))
+					e1000_phy_hw_reset(&adapter->hw);
+			}
 
 			/* update snapshot of PHY registers on LSC */
 			e1000_phy_read_status(adapter);
@@ -5288,6 +5304,7 @@ static void e1000_watchdog_task(struct work_struct *work)
 			if (phy->ops.cfg_on_link_up)
 				phy->ops.cfg_on_link_up(hw);
 
+			netif_wake_queue(netdev);
 			netif_carrier_on(netdev);
 
 			if (!test_bit(__E1000_DOWN, &adapter->state))
@@ -5301,6 +5318,7 @@ static void e1000_watchdog_task(struct work_struct *work)
 			/* Link status message must follow this format */
 			pr_info("%s NIC Link is Down\n", adapter->netdev->name);
 			netif_carrier_off(netdev);
+			netif_stop_queue(netdev);
 			if (!test_bit(__E1000_DOWN, &adapter->state))
 				mod_timer(&adapter->phy_info_timer,
 					  round_jiffies(jiffies + 2 * HZ));
@@ -5308,13 +5326,8 @@ static void e1000_watchdog_task(struct work_struct *work)
 			/* 8000ES2LAN requires a Rx packet buffer work-around
 			 * on link down event; reset the controller to flush
 			 * the Rx packet buffer.
-			 *
-			 * If the link is lost the controller stops DMA, but
-			 * if there is queued Tx work it cannot be done.  So
-			 * reset the controller to flush the Tx packet buffers.
 			 */
-			if ((adapter->flags & FLAG_RX_NEEDS_RESTART) ||
-			    e1000_desc_unused(tx_ring) + 1 < tx_ring->count)
+			if (adapter->flags & FLAG_RX_NEEDS_RESTART)
 				adapter->flags |= FLAG_RESTART_NOW;
 			else
 				pm_schedule_suspend(netdev->dev.parent,
@@ -5336,6 +5349,14 @@ link_up:
 	adapter->gotc = adapter->stats.gotc - adapter->gotc_old;
 	adapter->gotc_old = adapter->stats.gotc;
 	spin_unlock(&adapter->stats64_lock);
+
+	/* If the link is lost the controller stops DMA, but
+	 * if there is queued Tx work it cannot be done.  So
+	 * reset the controller to flush the Tx packet buffers.
+	 */
+	if (!netif_carrier_ok(netdev) &&
+	    (e1000_desc_unused(tx_ring) + 1 < tx_ring->count))
+		adapter->flags |= FLAG_RESTART_NOW;
 
 	/* If reset is necessary, do it outside of interrupt context. */
 	if (adapter->flags & FLAG_RESTART_NOW) {
@@ -5569,9 +5590,8 @@ static int e1000_tx_map(struct e1000_ring *tx_ring, struct sk_buff *skb,
 	}
 
 	for (f = 0; f < nr_frags; f++) {
-		const struct skb_frag_struct *frag;
+		const skb_frag_t *frag = &skb_shinfo(skb)->frags[f];
 
-		frag = &skb_shinfo(skb)->frags[f];
 		len = skb_frag_size(frag);
 		offset = 0;
 
@@ -6016,7 +6036,7 @@ static int e1000_change_mtu(struct net_device *netdev, int new_mtu)
 	}
 
 	while (test_and_set_bit(__E1000_RESETTING, &adapter->state))
-		usleep_range(1000, 2000);
+		usleep_range(1000, 1100);
 	/* e1000e_down -> e1000e_reset dependent on max_frame_size & mtu */
 	adapter->max_frame_size = max_frame;
 	e_info("changing MTU from %d to %d\n", netdev->mtu, new_mtu);
@@ -6287,16 +6307,20 @@ fl_out:
 
 static int e1000e_pm_freeze(struct device *dev)
 {
-	struct net_device *netdev = pci_get_drvdata(to_pci_dev(dev));
+	struct net_device *netdev = dev_get_drvdata(dev);
 	struct e1000_adapter *adapter = netdev_priv(netdev);
+	bool present;
 
+	rtnl_lock();
+
+	present = netif_device_present(netdev);
 	netif_device_detach(netdev);
 
-	if (netif_running(netdev)) {
+	if (present && netif_running(netdev)) {
 		int count = E1000_CHECK_RESET_COUNT;
 
 		while (test_bit(__E1000_RESETTING, &adapter->state) && count--)
-			usleep_range(10000, 20000);
+			usleep_range(10000, 11000);
 
 		WARN_ON(test_bit(__E1000_RESETTING, &adapter->state));
 
@@ -6304,6 +6328,8 @@ static int e1000e_pm_freeze(struct device *dev)
 		e1000e_down(adapter, false);
 		e1000_free_irq(adapter);
 	}
+	rtnl_unlock();
+
 	e1000e_reset_interrupt_capability(adapter);
 
 	/* Allow time for pending master requests to run */
@@ -6551,6 +6577,30 @@ static void e1000e_disable_aspm_locked(struct pci_dev *pdev, u16 state)
 	__e1000e_disable_aspm(pdev, state, 1);
 }
 
+static int e1000e_pm_thaw(struct device *dev)
+{
+	struct net_device *netdev = dev_get_drvdata(dev);
+	struct e1000_adapter *adapter = netdev_priv(netdev);
+	int rc = 0;
+
+	e1000e_set_interrupt_capability(adapter);
+
+	rtnl_lock();
+	if (netif_running(netdev)) {
+		rc = e1000_request_irq(adapter);
+		if (rc)
+			goto err_irq;
+
+		e1000e_up(adapter);
+	}
+
+	netif_device_attach(netdev);
+err_irq:
+	rtnl_unlock();
+
+	return rc;
+}
+
 #ifdef CONFIG_PM
 static int __e1000_resume(struct pci_dev *pdev)
 {
@@ -6618,26 +6668,6 @@ static int __e1000_resume(struct pci_dev *pdev)
 }
 
 #ifdef CONFIG_PM_SLEEP
-static int e1000e_pm_thaw(struct device *dev)
-{
-	struct net_device *netdev = pci_get_drvdata(to_pci_dev(dev));
-	struct e1000_adapter *adapter = netdev_priv(netdev);
-
-	e1000e_set_interrupt_capability(adapter);
-	if (netif_running(netdev)) {
-		u32 err = e1000_request_irq(adapter);
-
-		if (err)
-			return err;
-
-		e1000e_up(adapter);
-	}
-
-	netif_device_attach(netdev);
-
-	return 0;
-}
-
 static int e1000e_pm_suspend(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
@@ -6669,8 +6699,7 @@ static int e1000e_pm_resume(struct device *dev)
 
 static int e1000e_pm_runtime_idle(struct device *dev)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct net_device *netdev = pci_get_drvdata(pdev);
+	struct net_device *netdev = dev_get_drvdata(dev);
 	struct e1000_adapter *adapter = netdev_priv(netdev);
 	u16 eee_lp;
 
@@ -6711,7 +6740,7 @@ static int e1000e_pm_runtime_suspend(struct device *dev)
 		int count = E1000_CHECK_RESET_COUNT;
 
 		while (test_bit(__E1000_RESETTING, &adapter->state) && count--)
-			usleep_range(10000, 20000);
+			usleep_range(10000, 11000);
 
 		WARN_ON(test_bit(__E1000_RESETTING, &adapter->state));
 
@@ -6810,16 +6839,11 @@ static void e1000_netpoll(struct net_device *netdev)
 static pci_ers_result_t e1000_io_error_detected(struct pci_dev *pdev,
 						pci_channel_state_t state)
 {
-	struct net_device *netdev = pci_get_drvdata(pdev);
-	struct e1000_adapter *adapter = netdev_priv(netdev);
-
-	netif_device_detach(netdev);
+	e1000e_pm_freeze(&pdev->dev);
 
 	if (state == pci_channel_io_perm_failure)
 		return PCI_ERS_RESULT_DISCONNECT;
 
-	if (netif_running(netdev))
-		e1000e_down(adapter, true);
 	pci_disable_device(pdev);
 
 	/* Request a slot slot reset. */
@@ -6885,10 +6909,7 @@ static void e1000_io_resume(struct pci_dev *pdev)
 
 	e1000_init_manageability_pt(adapter);
 
-	if (netif_running(netdev))
-		e1000e_up(adapter);
-
-	netif_device_attach(netdev);
+	e1000e_pm_thaw(&pdev->dev);
 
 	/* If the controller has AMT, do not set DRV_LOAD until the interface
 	 * is up.  For all other cases, let the f/w know that the h/w is now
@@ -7386,15 +7407,13 @@ static void e1000_remove(struct pci_dev *pdev)
 {
 	struct net_device *netdev = pci_get_drvdata(pdev);
 	struct e1000_adapter *adapter = netdev_priv(netdev);
-	bool down = test_bit(__E1000_DOWN, &adapter->state);
 
 	e1000e_ptp_remove(adapter);
 
 	/* The timers may be rescheduled, so explicitly disable them
 	 * from being rescheduled.
 	 */
-	if (!down)
-		set_bit(__E1000_DOWN, &adapter->state);
+	set_bit(__E1000_DOWN, &adapter->state);
 	del_timer_sync(&adapter->watchdog_timer);
 	del_timer_sync(&adapter->phy_info_timer);
 
@@ -7412,9 +7431,6 @@ static void e1000_remove(struct pci_dev *pdev)
 		}
 	}
 
-	/* Don't lie to e1000_close() down the road. */
-	if (!down)
-		clear_bit(__E1000_DOWN, &adapter->state);
 	unregister_netdev(netdev);
 
 	if (pci_dev_run_wake(pdev))

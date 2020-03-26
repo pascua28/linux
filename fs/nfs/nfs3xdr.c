@@ -343,7 +343,7 @@ static int decode_nfsstat3(struct xdr_stream *xdr, enum nfs_stat *status)
 	return 0;
 out_status:
 	*status = be32_to_cpup(p);
-	trace_nfs_xdr_status((int)*status);
+	trace_nfs_xdr_status(xdr, (int)*status);
 	return 0;
 }
 
@@ -2338,6 +2338,7 @@ static int nfs3_xdr_dec_commit3res(struct rpc_rqst *req,
 				   void *data)
 {
 	struct nfs_commitres *result = data;
+	struct nfs_writeverf *verf = result->verf;
 	enum nfs_stat status;
 	int error;
 
@@ -2350,7 +2351,9 @@ static int nfs3_xdr_dec_commit3res(struct rpc_rqst *req,
 	result->op_status = status;
 	if (status != NFS3_OK)
 		goto out_status;
-	error = decode_writeverf3(xdr, &result->verf->verifier);
+	error = decode_writeverf3(xdr, &verf->verifier);
+	if (!error)
+		verf->committed = NFS_FILE_SYNC;
 out:
 	return error;
 out_status:

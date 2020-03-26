@@ -183,7 +183,7 @@ void zpci_remove_reserved_devices(void);
 /* CLP */
 int clp_scan_pci_devices(void);
 int clp_rescan_pci_devices(void);
-int clp_rescan_pci_devices_simple(void);
+int clp_rescan_pci_devices_simple(u32 *fid);
 int clp_add_pci_device(u32, u32, int);
 int clp_enable_fh(struct zpci_dev *, u8);
 int clp_disable_fh(struct zpci_dev *);
@@ -194,6 +194,11 @@ int zpci_init_iommu(struct zpci_dev *zdev);
 void zpci_destroy_iommu(struct zpci_dev *zdev);
 
 #ifdef CONFIG_PCI
+static inline bool zpci_use_mio(struct zpci_dev *zdev)
+{
+	return static_branch_likely(&have_mio) && zdev->mio_capable;
+}
+
 /* Error handling and recovery */
 void zpci_event_error(void *);
 void zpci_event_availability(void *);

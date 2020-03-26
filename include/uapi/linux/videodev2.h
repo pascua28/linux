@@ -70,7 +70,7 @@
  * Common stuff for both V4L1 and V4L2
  * Moved from videodev.h
  */
-#define VIDEO_MAX_FRAME               32
+#define VIDEO_MAX_FRAME               64
 #define VIDEO_MAX_PLANES               8
 
 /*
@@ -80,7 +80,7 @@
 /*  Four-character-code (FOURCC) */
 #define v4l2_fourcc(a, b, c, d)\
 	((__u32)(a) | ((__u32)(b) << 8) | ((__u32)(c) << 16) | ((__u32)(d) << 24))
-#define v4l2_fourcc_be(a, b, c, d)	(v4l2_fourcc(a, b, c, d) | (1 << 31))
+#define v4l2_fourcc_be(a, b, c, d)	(v4l2_fourcc(a, b, c, d) | (1U << 31))
 
 /*
  *	E N U M S
@@ -518,7 +518,13 @@ struct v4l2_pix_format {
 #define V4L2_PIX_FMT_RGBX444 v4l2_fourcc('R', 'X', '1', '2') /* 16  rrrrgggg bbbbxxxx */
 #define V4L2_PIX_FMT_ABGR444 v4l2_fourcc('A', 'B', '1', '2') /* 16  aaaabbbb ggggrrrr */
 #define V4L2_PIX_FMT_XBGR444 v4l2_fourcc('X', 'B', '1', '2') /* 16  xxxxbbbb ggggrrrr */
-#define V4L2_PIX_FMT_BGRA444 v4l2_fourcc('B', 'A', '1', '2') /* 16  bbbbgggg rrrraaaa */
+
+/*
+ * Originally this had 'BA12' as fourcc, but this clashed with the older
+ * V4L2_PIX_FMT_SGRBG12 which inexplicably used that same fourcc.
+ * So use 'GA12' instead for V4L2_PIX_FMT_BGRA444.
+ */
+#define V4L2_PIX_FMT_BGRA444 v4l2_fourcc('G', 'A', '1', '2') /* 16  bbbbgggg rrrraaaa */
 #define V4L2_PIX_FMT_BGRX444 v4l2_fourcc('B', 'X', '1', '2') /* 16  bbbbgggg rrrrxxxx */
 #define V4L2_PIX_FMT_RGB555  v4l2_fourcc('R', 'G', 'B', 'O') /* 16  RGB-5-5-5     */
 #define V4L2_PIX_FMT_ARGB555 v4l2_fourcc('A', 'R', '1', '5') /* 16  ARGB-1-5-5-5  */
@@ -768,8 +774,10 @@ struct v4l2_fmtdesc {
 	__u32		    reserved[4];
 };
 
-#define V4L2_FMT_FLAG_COMPRESSED 0x0001
-#define V4L2_FMT_FLAG_EMULATED   0x0002
+#define V4L2_FMT_FLAG_COMPRESSED		0x0001
+#define V4L2_FMT_FLAG_EMULATED			0x0002
+#define V4L2_FMT_FLAG_CONTINUOUS_BYTESTREAM	0x0004
+#define V4L2_FMT_FLAG_DYN_RESOLUTION		0x0008
 
 	/* Frame Size and frame rate enumeration */
 /*
@@ -927,7 +935,9 @@ struct v4l2_requestbuffers {
  *			descriptor associated with this plane
  * @data_offset:	offset in the plane to the start of data; usually 0,
  *			unless there is a header in front of the data
- *
+ * @reserved:		few userspace clients and drivers use reserved fields
+ *			and it is up to them how these fields are used. v4l2
+ *			simply copy reserved fields between them.
  * Multi-planar buffers consist of one or more planes, e.g. an YCbCr buffer
  * with two planes can have one plane for Y, and another for interleaved CbCr
  * components. Each plane can reside in a separate memory buffer, or even in
@@ -942,6 +952,7 @@ struct v4l2_plane {
 		__s32		fd;
 	} m;
 	__u32			data_offset;
+	/* reserved fields used by few userspace clients and drivers */
 	__u32			reserved[11];
 };
 

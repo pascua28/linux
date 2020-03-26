@@ -139,6 +139,11 @@ static inline int is_paging(struct kvm_vcpu *vcpu)
 	return likely(kvm_read_cr0_bits(vcpu, X86_CR0_PG));
 }
 
+static inline bool is_pae_paging(struct kvm_vcpu *vcpu)
+{
+	return !is_long_mode(vcpu) && is_pae(vcpu) && is_paging(vcpu);
+}
+
 static inline u32 bit(int bitno)
 {
 	return 1 << (bitno & 31);
@@ -191,7 +196,7 @@ static inline void vcpu_cache_mmio_info(struct kvm_vcpu *vcpu,
 	 * actually a nGPA.
 	 */
 	vcpu->arch.mmio_gva = mmu_is_nested(vcpu) ? 0 : gva & PAGE_MASK;
-	vcpu->arch.access = access;
+	vcpu->arch.mmio_access = access;
 	vcpu->arch.mmio_gfn = gfn;
 	vcpu->arch.mmio_gen = gen;
 }
@@ -256,7 +261,7 @@ static inline bool kvm_check_has_quirk(struct kvm *kvm, u64 quirk)
 }
 
 void kvm_set_pending_timer(struct kvm_vcpu *vcpu);
-int kvm_inject_realmode_interrupt(struct kvm_vcpu *vcpu, int irq, int inc_eip);
+void kvm_inject_realmode_interrupt(struct kvm_vcpu *vcpu, int irq, int inc_eip);
 
 void kvm_write_tsc(struct kvm_vcpu *vcpu, struct msr_data *msr);
 u64 get_kvmclock_ns(struct kvm *kvm);
@@ -281,7 +286,7 @@ int kvm_mtrr_get_msr(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata);
 bool kvm_mtrr_check_gfn_range_consistency(struct kvm_vcpu *vcpu, gfn_t gfn,
 					  int page_num);
 bool kvm_vector_hashing_enabled(void);
-int x86_emulate_instruction(struct kvm_vcpu *vcpu, unsigned long cr2,
+int x86_emulate_instruction(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
 			    int emulation_type, void *insn, int insn_len);
 
 #define KVM_SUPPORTED_XCR0     (XFEATURE_MASK_FP | XFEATURE_MASK_SSE \
@@ -295,6 +300,8 @@ extern u64 kvm_supported_xcr0(void);
 extern unsigned int min_timer_period_us;
 
 extern bool enable_vmware_backdoor;
+
+extern int pi_inject_timer;
 
 extern struct static_key kvm_no_apic_vcpu;
 
@@ -331,6 +338,11 @@ static inline bool kvm_hlt_in_guest(struct kvm *kvm)
 static inline bool kvm_pause_in_guest(struct kvm *kvm)
 {
 	return kvm->arch.pause_in_guest;
+}
+
+static inline bool kvm_cstate_in_guest(struct kvm *kvm)
+{
+	return kvm->arch.cstate_in_guest;
 }
 
 DECLARE_PER_CPU(struct kvm_vcpu *, current_vcpu);

@@ -599,7 +599,7 @@ static char *string_nocheck(char *buf, char *end, const char *s,
 			    struct printf_spec spec)
 {
 	int len = 0;
-	size_t lim = spec.precision;
+	int lim = spec.precision;
 
 	while (lim--) {
 		char c = *s++;
@@ -738,25 +738,13 @@ static int __init initialize_ptr_random(void)
 	return ret;
 }
 early_initcall(initialize_ptr_random);
-
-/* Maps a pointer to a 32 bit unique identifier. */
-static char *ptr_to_id(char *buf, char *end, const void *ptr,
-		       struct printf_spec spec)
+ 
+static inline int __ptr_to_hashval(const void *ptr, unsigned long *hashval_out)
 {
-	const char *str = sizeof(ptr) == 8 ? "(____ptrval____)" : "(ptrval)";
 	unsigned long hashval;
 
-	/* When debugging early boot use non-cryptographically secure hash. */
-	if (unlikely(debug_boot_weak_hash)) {
-		hashval = hash_long((unsigned long)ptr, 32);
-		return pointer_string(buf, end, (const void *)hashval, spec);
-	}
-
-	if (static_branch_unlikely(&not_filled_random_ptr_key)) {
-		spec.field_width = 2 * sizeof(ptr);
-		/* string length must be less than default_width */
-		return error_string(buf, end, str, spec);
-	}
+	if (static_branch_unlikely(&not_filled_random_ptr_key))
+		return -EAGAIN;
 
 #ifdef CONFIG_64BIT
 	hashval = (unsigned long)siphash_1u64((u64)ptr, &ptr_key);
@@ -768,6 +756,36 @@ static char *ptr_to_id(char *buf, char *end, const void *ptr,
 #else
 	hashval = (unsigned long)siphash_1u32((u32)ptr, &ptr_key);
 #endif
+	*hashval_out = hashval;
+	return 0;
+}
+
+int ptr_to_hashval(const void *ptr, unsigned long *hashval_out)
+{
+	return __ptr_to_hashval(ptr, hashval_out);
+}
+
+/* Maps a pointer to a 32 bit unique identifier. */
+static char *ptr_to_id(char *buf, char *end, const void *ptr,
+		       struct printf_spec spec)
+{
+	const char *str = sizeof(ptr) == 8 ? "(____ptrval____)" : "(ptrval)";
+	unsigned long hashval;
+	int ret;
+
+	/* When debugging early boot use non-cryptographically secure hash. */
+	if (unlikely(debug_boot_weak_hash)) {
+		hashval = hash_long((unsigned long)ptr, 32);
+		return pointer_string(buf, end, (const void *)hashval, spec);
+	}
+
+	ret = __ptr_to_hashval(ptr, &hashval);
+	if (ret) {
+		spec.field_width = 2 * sizeof(ptr);
+		/* string length must be less than default_width */
+		return error_string(buf, end, str, spec);
+	}
+
 	return pointer_string(buf, end, (const void *)hashval, spec);
 }
 
@@ -869,6 +887,15 @@ char *dentry_name(char *buf, char *end, const struct dentry *d, struct printf_sp
 	return widen_string(buf, n, end, spec);
 }
 
+static noinline_for_stack
+char *file_dentry_name(char *buf, char *end, const struct file *f,
+			struct printf_spec spec, const char *fmt)
+{
+	if (check_pointer(&buf, end, f, spec))
+		return buf;
+
+	return dentry_name(buf, end, f->f_path.dentry, spec, fmt);
+}
 #ifdef CONFIG_BLOCK
 static noinline_for_stack
 char *bdev_name(char *buf, char *end, struct block_device *bdev,
@@ -1799,7 +1826,7 @@ char *clock(char *buf, char *end, struct clk *clk, struct printf_spec spec,
 #ifdef CONFIG_COMMON_CLK
 		return string(buf, end, __clk_get_name(clk), spec);
 #else
-		return error_string(buf, end, "(%pC?)", spec);
+		return ptr_to_id(buf, end, clk, spec);
 #endif
 	}
 }
@@ -2166,9 +2193,7 @@ char *pointer(const char *fmt, char *buf, char *end, void *ptr,
 	case 'C':
 		return clock(buf, end, ptr, spec, fmt);
 	case 'D':
-		return dentry_name(buf, end,
-				   ((const struct file *)ptr)->f_path.dentry,
-				   spec, fmt);
+		return file_dentry_name(buf, end, ptr, spec, fmt);
 #ifdef CONFIG_BLOCK
 	case 'g':
 		return bdev_name(buf, end, ptr, spec, fmt);

@@ -108,7 +108,7 @@ lpfc_get_iocb_from_iocbq(struct lpfc_iocbq *iocbq)
  * endianness. This function can be called with or without
  * lock.
  **/
-void
+static void
 lpfc_sli4_pcimem_bcopy(void *srcp, void *destp, uint32_t cnt)
 {
 	uint64_t *src = srcp;
@@ -1391,9 +1391,12 @@ lpfc_sli_cancel_iocbs(struct lpfc_hba *phba, struct list_head *iocblist,
 
 	while (!list_empty(iocblist)) {
 		list_remove_head(iocblist, piocb, struct lpfc_iocbq, list);
-		if (!piocb->iocb_cmpl)
-			lpfc_sli_release_iocbq(phba, piocb);
-		else {
+		if (!piocb->iocb_cmpl) {
+			if (piocb->iocb_flag & LPFC_IO_NVME)
+				lpfc_nvme_cancel_iocb(phba, piocb);
+			else
+				lpfc_sli_release_iocbq(phba, piocb);
+		} else {
 			piocb->iocb.ulpStatus = ulpstatus;
 			piocb->iocb.un.ulpWord[4] = ulpWord4;
 			(piocb->iocb_cmpl) (phba, piocb, piocb);
@@ -2426,6 +2429,20 @@ lpfc_sli_wake_mbox_wait(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmboxq)
 	return;
 }
 
+static void
+__lpfc_sli_rpi_release(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp)
+{
+	unsigned long iflags;
+
+	if (ndlp->nlp_flag & NLP_RELEASE_RPI) {
+		lpfc_sli4_free_rpi(vport->phba, ndlp->nlp_rpi);
+		spin_lock_irqsave(&vport->phba->ndlp_lock, iflags);
+		ndlp->nlp_flag &= ~NLP_RELEASE_RPI;
+		ndlp->nlp_rpi = LPFC_RPI_ALLOC_ERROR;
+		spin_unlock_irqrestore(&vport->phba->ndlp_lock, iflags);
+	}
+	ndlp->nlp_flag &= ~NLP_UNREG_INP;
+}
 
 /**
  * lpfc_sli_def_mbox_cmpl - Default mailbox completion handler
@@ -2497,7 +2514,7 @@ lpfc_sli_def_mbox_cmpl(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 				vport,
 				KERN_INFO, LOG_MBOX | LOG_DISCOVERY,
 				"1438 UNREG cmpl deferred mbox x%x "
-				"on NPort x%x Data: x%x x%x %p\n",
+				"on NPort x%x Data: x%x x%x %px\n",
 				ndlp->nlp_rpi, ndlp->nlp_DID,
 				ndlp->nlp_flag, ndlp->nlp_defer_did, ndlp);
 
@@ -2507,8 +2524,10 @@ lpfc_sli_def_mbox_cmpl(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 				ndlp->nlp_defer_did = NLP_EVT_NOTHING_PENDING;
 				lpfc_issue_els_plogi(vport, ndlp->nlp_DID, 0);
 			} else {
-				ndlp->nlp_flag &= ~NLP_UNREG_INP;
+				__lpfc_sli_rpi_release(vport, ndlp);
 			}
+			if (vport->load_flag & FC_UNLOADING)
+				lpfc_nlp_put(ndlp);
 			pmb->ctx_ndlp = NULL;
 		}
 	}
@@ -2555,7 +2574,7 @@ lpfc_sli4_unreg_rpi_cmpl_clr(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 					vport, KERN_INFO, LOG_MBOX | LOG_SLI,
 					 "0010 UNREG_LOGIN vpi:%x "
 					 "rpi:%x DID:%x defer x%x flg x%x "
-					 "map:%x %p\n",
+					 "map:%x %px\n",
 					 vport->vpi, ndlp->nlp_rpi,
 					 ndlp->nlp_DID, ndlp->nlp_defer_did,
 					 ndlp->nlp_flag,
@@ -2573,7 +2592,7 @@ lpfc_sli4_unreg_rpi_cmpl_clr(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 						vport, KERN_INFO, LOG_DISCOVERY,
 						"4111 UNREG cmpl deferred "
 						"clr x%x on "
-						"NPort x%x Data: x%x %p\n",
+						"NPort x%x Data: x%x x%px\n",
 						ndlp->nlp_rpi, ndlp->nlp_DID,
 						ndlp->nlp_defer_did, ndlp);
 					ndlp->nlp_flag &= ~NLP_UNREG_INP;
@@ -2582,7 +2601,7 @@ lpfc_sli4_unreg_rpi_cmpl_clr(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 					lpfc_issue_els_plogi(
 						vport, ndlp->nlp_DID, 0);
 				} else {
-					ndlp->nlp_flag &= ~NLP_UNREG_INP;
+					__lpfc_sli_rpi_release(vport, ndlp);
 				}
 			}
 		}
@@ -2695,7 +2714,7 @@ lpfc_sli_handle_mb_event(struct lpfc_hba *phba)
 
 		/* Mailbox cmd <cmd> Cmpl <cmpl> */
 		lpfc_printf_log(phba, KERN_INFO, LOG_MBOX | LOG_SLI,
-				"(%d):0307 Mailbox cmd x%x (x%x/x%x) Cmpl x%p "
+				"(%d):0307 Mailbox cmd x%x (x%x/x%x) Cmpl %ps "
 				"Data: x%x x%x x%x x%x x%x x%x x%x x%x x%x "
 				"x%x x%x x%x\n",
 				pmb->vport ? pmb->vport->vpi : 0,
@@ -3961,7 +3980,7 @@ lpfc_sli_abort_fcp_rings(struct lpfc_hba *phba)
 	/* Look on all the FCP Rings for the iotag */
 	if (phba->sli_rev >= LPFC_SLI_REV4) {
 		for (i = 0; i < phba->cfg_hdw_queue; i++) {
-			pring = phba->sli4_hba.hdwq[i].fcp_wq->pring;
+			pring = phba->sli4_hba.hdwq[i].io_wq->pring;
 			lpfc_sli_abort_iocb_ring(phba, pring);
 		}
 	} else {
@@ -3971,17 +3990,17 @@ lpfc_sli_abort_fcp_rings(struct lpfc_hba *phba)
 }
 
 /**
- * lpfc_sli_flush_fcp_rings - flush all iocbs in the fcp ring
+ * lpfc_sli_flush_io_rings - flush all iocbs in the IO ring
  * @phba: Pointer to HBA context object.
  *
- * This function flushes all iocbs in the fcp ring and frees all the iocb
+ * This function flushes all iocbs in the IO ring and frees all the iocb
  * objects in txq and txcmplq. This function will not issue abort iocbs
  * for all the iocb commands in txcmplq, they will just be returned with
  * IOERR_SLI_DOWN. This function is invoked with EEH when device's PCI
  * slot has been permanently disabled.
  **/
 void
-lpfc_sli_flush_fcp_rings(struct lpfc_hba *phba)
+lpfc_sli_flush_io_rings(struct lpfc_hba *phba)
 {
 	LIST_HEAD(txq);
 	LIST_HEAD(txcmplq);
@@ -3992,13 +4011,13 @@ lpfc_sli_flush_fcp_rings(struct lpfc_hba *phba)
 
 	spin_lock_irq(&phba->hbalock);
 	/* Indicate the I/O queues are flushed */
-	phba->hba_flag |= HBA_FCP_IOQ_FLUSH;
+	phba->hba_flag |= HBA_IOQ_FLUSH;
 	spin_unlock_irq(&phba->hbalock);
 
 	/* Look on all the FCP Rings for the iotag */
 	if (phba->sli_rev >= LPFC_SLI_REV4) {
 		for (i = 0; i < phba->cfg_hdw_queue; i++) {
-			pring = phba->sli4_hba.hdwq[i].fcp_wq->pring;
+			pring = phba->sli4_hba.hdwq[i].io_wq->pring;
 
 			spin_lock_irq(&pring->ring_lock);
 			/* Retrieve everything on txq */
@@ -4041,56 +4060,6 @@ lpfc_sli_flush_fcp_rings(struct lpfc_hba *phba)
 				      IOERR_SLI_DOWN);
 		/* Flush the txcmpq */
 		lpfc_sli_cancel_iocbs(phba, &txcmplq, IOSTAT_LOCAL_REJECT,
-				      IOERR_SLI_DOWN);
-	}
-}
-
-/**
- * lpfc_sli_flush_nvme_rings - flush all wqes in the nvme rings
- * @phba: Pointer to HBA context object.
- *
- * This function flushes all wqes in the nvme rings and frees all resources
- * in the txcmplq. This function does not issue abort wqes for the IO
- * commands in txcmplq, they will just be returned with
- * IOERR_SLI_DOWN. This function is invoked with EEH when device's PCI
- * slot has been permanently disabled.
- **/
-void
-lpfc_sli_flush_nvme_rings(struct lpfc_hba *phba)
-{
-	LIST_HEAD(txcmplq);
-	struct lpfc_sli_ring  *pring;
-	uint32_t i;
-	struct lpfc_iocbq *piocb, *next_iocb;
-
-	if ((phba->sli_rev < LPFC_SLI_REV4) ||
-	    !(phba->cfg_enable_fc4_type & LPFC_ENABLE_NVME))
-		return;
-
-	/* Hint to other driver operations that a flush is in progress. */
-	spin_lock_irq(&phba->hbalock);
-	phba->hba_flag |= HBA_NVME_IOQ_FLUSH;
-	spin_unlock_irq(&phba->hbalock);
-
-	/* Cycle through all NVME rings and complete each IO with
-	 * a local driver reason code.  This is a flush so no
-	 * abort exchange to FW.
-	 */
-	for (i = 0; i < phba->cfg_hdw_queue; i++) {
-		pring = phba->sli4_hba.hdwq[i].nvme_wq->pring;
-
-		spin_lock_irq(&pring->ring_lock);
-		list_for_each_entry_safe(piocb, next_iocb,
-					 &pring->txcmplq, list)
-			piocb->iocb_flag &= ~LPFC_IO_ON_TXCMPLQ;
-		/* Retrieve everything on the txcmplq */
-		list_splice_init(&pring->txcmplq, &txcmplq);
-		pring->txcmplq_cnt = 0;
-		spin_unlock_irq(&pring->ring_lock);
-
-		/* Flush the txcmpq &&&PAE */
-		lpfc_sli_cancel_iocbs(phba, &txcmplq,
-				      IOSTAT_LOCAL_REJECT,
 				      IOERR_SLI_DOWN);
 	}
 }
@@ -4495,7 +4464,7 @@ lpfc_sli_brdreset(struct lpfc_hba *phba)
  * checking during resets the device. The caller is not required to hold
  * any locks.
  *
- * This function returns 0 always.
+ * This function returns 0 on success else returns negative error code.
  **/
 int
 lpfc_sli4_brdreset(struct lpfc_hba *phba)
@@ -4652,8 +4621,10 @@ lpfc_sli_brdrestart_s4(struct lpfc_hba *phba)
 	hba_aer_enabled = phba->hba_flag & HBA_AER_ENABLED;
 
 	rc = lpfc_sli4_brdreset(phba);
-	if (rc)
-		return rc;
+	if (rc) {
+		phba->link_state = LPFC_HBA_ERROR;
+		goto hba_down_queue;
+	}
 
 	spin_lock_irq(&phba->hbalock);
 	phba->pport->stopped = 0;
@@ -4668,6 +4639,7 @@ lpfc_sli_brdrestart_s4(struct lpfc_hba *phba)
 	if (hba_aer_enabled)
 		pci_disable_pcie_error_reporting(phba->pcidev);
 
+hba_down_queue:
 	lpfc_hba_down_post(phba);
 	lpfc_sli4_queue_destroy(phba);
 
@@ -5571,6 +5543,7 @@ lpfc_sli4_arm_cqeq_intr(struct lpfc_hba *phba)
 	int qidx;
 	struct lpfc_sli4_hba *sli4_hba = &phba->sli4_hba;
 	struct lpfc_sli4_hdw_queue *qp;
+	struct lpfc_queue *eq;
 
 	sli4_hba->sli4_write_cq_db(phba, sli4_hba->mbx_cq, 0, LPFC_QUEUE_REARM);
 	sli4_hba->sli4_write_cq_db(phba, sli4_hba->els_cq, 0, LPFC_QUEUE_REARM);
@@ -5578,18 +5551,22 @@ lpfc_sli4_arm_cqeq_intr(struct lpfc_hba *phba)
 		sli4_hba->sli4_write_cq_db(phba, sli4_hba->nvmels_cq, 0,
 					   LPFC_QUEUE_REARM);
 
-	qp = sli4_hba->hdwq;
 	if (sli4_hba->hdwq) {
+		/* Loop thru all Hardware Queues */
 		for (qidx = 0; qidx < phba->cfg_hdw_queue; qidx++) {
-			sli4_hba->sli4_write_cq_db(phba, qp[qidx].fcp_cq, 0,
-						   LPFC_QUEUE_REARM);
-			sli4_hba->sli4_write_cq_db(phba, qp[qidx].nvme_cq, 0,
-						   LPFC_QUEUE_REARM);
+			qp = &sli4_hba->hdwq[qidx];
+			/* ARM the corresponding CQ */
+			sli4_hba->sli4_write_cq_db(phba, qp->io_cq, 0,
+						LPFC_QUEUE_REARM);
 		}
 
-		for (qidx = 0; qidx < phba->cfg_irq_chann; qidx++)
-			sli4_hba->sli4_write_eq_db(phba, qp[qidx].hba_eq,
-						0, LPFC_QUEUE_REARM);
+		/* Loop thru all IRQ vectors */
+		for (qidx = 0; qidx < phba->cfg_irq_chann; qidx++) {
+			eq = sli4_hba->hba_eq_hdl[qidx].eq;
+			/* ARM the corresponding EQ */
+			sli4_hba->sli4_write_eq_db(phba, eq,
+						   0, LPFC_QUEUE_REARM);
+		}
 	}
 
 	if (phba->nvmet_support) {
@@ -7236,7 +7213,7 @@ lpfc_sli4_hba_setup(struct lpfc_hba *phba)
 	else
 		phba->hba_flag &= ~HBA_FIP_SUPPORT;
 
-	phba->hba_flag &= ~HBA_FCP_IOQ_FLUSH;
+	phba->hba_flag &= ~HBA_IOQ_FLUSH;
 
 	if (phba->sli_rev != LPFC_SLI_REV4) {
 		lpfc_printf_log(phba, KERN_ERR, LOG_MBOX | LOG_SLI,
@@ -7875,26 +7852,28 @@ lpfc_sli4_mbox_completions_pending(struct lpfc_hba *phba)
  * and will process all the completions associated with the eq for the
  * mailbox completion queue.
  **/
-bool
+static bool
 lpfc_sli4_process_missed_mbox_completions(struct lpfc_hba *phba)
 {
 	struct lpfc_sli4_hba *sli4_hba = &phba->sli4_hba;
 	uint32_t eqidx;
 	struct lpfc_queue *fpeq = NULL;
+	struct lpfc_queue *eq;
 	bool mbox_pending;
 
 	if (unlikely(!phba) || (phba->sli_rev != LPFC_SLI_REV4))
 		return false;
 
-	/* Find the eq associated with the mcq */
-
-	if (sli4_hba->hdwq)
-		for (eqidx = 0; eqidx < phba->cfg_irq_chann; eqidx++)
-			if (sli4_hba->hdwq[eqidx].hba_eq->queue_id ==
-			    sli4_hba->mbx_cq->assoc_qid) {
-				fpeq = sli4_hba->hdwq[eqidx].hba_eq;
+	/* Find the EQ associated with the mbox CQ */
+	if (sli4_hba->hdwq) {
+		for (eqidx = 0; eqidx < phba->cfg_irq_chann; eqidx++) {
+			eq = phba->sli4_hba.hba_eq_hdl[eqidx].eq;
+			if (eq && eq->queue_id == sli4_hba->mbx_cq->assoc_qid) {
+				fpeq = eq;
 				break;
 			}
+		}
+	}
 	if (!fpeq)
 		return false;
 
@@ -7963,7 +7942,7 @@ lpfc_mbox_timeout_handler(struct lpfc_hba *phba)
 
 	/* Mbox cmd <mbxCommand> timeout */
 	lpfc_printf_log(phba, KERN_ERR, LOG_MBOX | LOG_SLI,
-			"0310 Mailbox command x%x timeout Data: x%x x%x x%p\n",
+			"0310 Mailbox command x%x timeout Data: x%x x%x x%px\n",
 			mb->mbxCommand,
 			phba->pport->port_state,
 			phba->sli.sli_flag,
@@ -9324,11 +9303,9 @@ lpfc_sli4_iocb2wqe(struct lpfc_hba *phba, struct lpfc_iocbq *iocbq,
 		memset(wqe, 0, sizeof(union lpfc_wqe128));
 	/* Some of the fields are in the right position already */
 	memcpy(wqe, &iocbq->iocb, sizeof(union lpfc_wqe));
-	if (iocbq->iocb.ulpCommand != CMD_SEND_FRAME) {
-		/* The ct field has moved so reset */
-		wqe->generic.wqe_com.word7 = 0;
-		wqe->generic.wqe_com.word10 = 0;
-	}
+	/* The ct field has moved so reset */
+	wqe->generic.wqe_com.word7 = 0;
+	wqe->generic.wqe_com.word10 = 0;
 
 	abort_tag = (uint32_t) iocbq->iotag;
 	xritag = iocbq->sli4_xritag;
@@ -9398,6 +9375,7 @@ lpfc_sli4_iocb2wqe(struct lpfc_hba *phba, struct lpfc_iocbq *iocbq,
 		if (if_type >= LPFC_SLI_INTF_IF_TYPE_2) {
 			if (pcmd && (*pcmd == ELS_CMD_FLOGI ||
 				*pcmd == ELS_CMD_SCR ||
+				*pcmd == ELS_CMD_RSCN_XMT ||
 				*pcmd == ELS_CMD_FDISC ||
 				*pcmd == ELS_CMD_LOGO ||
 				*pcmd == ELS_CMD_PLOGI)) {
@@ -9786,7 +9764,7 @@ lpfc_sli4_iocb2wqe(struct lpfc_hba *phba, struct lpfc_iocbq *iocbq,
 		 * we re-construct this WQE here based on information in
 		 * iocbq from scratch.
 		 */
-		memset(wqe, 0, sizeof(union lpfc_wqe));
+		memset(wqe, 0, sizeof(*wqe));
 		/* OX_ID is invariable to who sent ABTS to CT exchange */
 		bf_set(xmit_bls_rsp64_oxid, &wqe->xmit_bls_rsp,
 		       bf_get(lpfc_abts_oxid, &iocbq->iocb.un.bls_rsp));
@@ -9833,6 +9811,15 @@ lpfc_sli4_iocb2wqe(struct lpfc_hba *phba, struct lpfc_iocbq *iocbq,
 
 		break;
 	case CMD_SEND_FRAME:
+		bf_set(wqe_cmnd, &wqe->generic.wqe_com, CMD_SEND_FRAME);
+		bf_set(wqe_sof, &wqe->generic.wqe_com, 0x2E); /* SOF byte */
+		bf_set(wqe_eof, &wqe->generic.wqe_com, 0x41); /* EOF byte */
+		bf_set(wqe_lenloc, &wqe->generic.wqe_com, 1);
+		bf_set(wqe_xbl, &wqe->generic.wqe_com, 1);
+		bf_set(wqe_dbde, &wqe->generic.wqe_com, 1);
+		bf_set(wqe_xc, &wqe->generic.wqe_com, 1);
+		bf_set(wqe_cmd_type, &wqe->generic.wqe_com, 0xA);
+		bf_set(wqe_cqid, &wqe->generic.wqe_com, LPFC_WQE_CQ_ID_DEFAULT);
 		bf_set(wqe_xri_tag, &wqe->generic.wqe_com, xritag);
 		bf_set(wqe_reqtag, &wqe->generic.wqe_com, iocbq->iotag);
 		return 0;
@@ -9894,7 +9881,7 @@ __lpfc_sli_issue_iocb_s4(struct lpfc_hba *phba, uint32_t ring_number,
 	/* Get the WQ */
 	if ((piocb->iocb_flag & LPFC_IO_FCP) ||
 	    (piocb->iocb_flag & LPFC_USE_FCPWQIDX)) {
-		wq = phba->sli4_hba.hdwq[piocb->hba_wqidx].fcp_wq;
+		wq = phba->sli4_hba.hdwq[piocb->hba_wqidx].io_wq;
 	} else {
 		wq = phba->sli4_hba.els_wq;
 	}
@@ -10041,7 +10028,7 @@ lpfc_sli4_calc_ring(struct lpfc_hba *phba, struct lpfc_iocbq *piocb)
 			lpfc_cmd = (struct lpfc_io_buf *)piocb->context1;
 			piocb->hba_wqidx = lpfc_cmd->hdwq_no;
 		}
-		return phba->sli4_hba.hdwq[piocb->hba_wqidx].fcp_wq->pring;
+		return phba->sli4_hba.hdwq[piocb->hba_wqidx].io_wq->pring;
 	} else {
 		if (unlikely(!phba->sli4_hba.els_wq))
 			return NULL;
@@ -10494,7 +10481,7 @@ lpfc_sli4_queue_init(struct lpfc_hba *phba)
 	INIT_LIST_HEAD(&psli->mboxq_cmpl);
 	/* Initialize list headers for txq and txcmplq as double linked lists */
 	for (i = 0; i < phba->cfg_hdw_queue; i++) {
-		pring = phba->sli4_hba.hdwq[i].fcp_wq->pring;
+		pring = phba->sli4_hba.hdwq[i].io_wq->pring;
 		pring->flag = 0;
 		pring->ringno = LPFC_FCP_RING;
 		pring->txcmplq_cnt = 0;
@@ -10513,16 +10500,6 @@ lpfc_sli4_queue_init(struct lpfc_hba *phba)
 	spin_lock_init(&pring->ring_lock);
 
 	if (phba->cfg_enable_fc4_type & LPFC_ENABLE_NVME) {
-		for (i = 0; i < phba->cfg_hdw_queue; i++) {
-			pring = phba->sli4_hba.hdwq[i].nvme_wq->pring;
-			pring->flag = 0;
-			pring->ringno = LPFC_FCP_RING;
-			pring->txcmplq_cnt = 0;
-			INIT_LIST_HEAD(&pring->txq);
-			INIT_LIST_HEAD(&pring->txcmplq);
-			INIT_LIST_HEAD(&pring->iocb_continueq);
-			spin_lock_init(&pring->ring_lock);
-		}
 		pring = phba->sli4_hba.nvmels_wq->pring;
 		pring->flag = 0;
 		pring->ringno = LPFC_ELS_RING;
@@ -10786,9 +10763,9 @@ lpfc_sli_hba_down(struct lpfc_hba *phba)
 			pring = qp->pring;
 			if (!pring)
 				continue;
-			spin_lock_irq(&pring->ring_lock);
+			spin_lock(&pring->ring_lock);
 			list_splice_init(&pring->txq, &completions);
-			spin_unlock_irq(&pring->ring_lock);
+			spin_unlock(&pring->ring_lock);
 			if (pring == phba->sli4_hba.els_wq->pring) {
 				pring->flag |= LPFC_DEFERRED_RING_EVENT;
 				/* Set the lpfc data pending flag */
@@ -10969,7 +10946,7 @@ lpfc_sli_ring_taggedbuf_get(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 	spin_unlock_irq(&phba->hbalock);
 	lpfc_printf_log(phba, KERN_ERR, LOG_INIT,
 			"0402 Cannot find virtual addr for buffer tag on "
-			"ring %d Data x%lx x%p x%p x%x\n",
+			"ring %d Data x%lx x%px x%px x%x\n",
 			pring->ringno, (unsigned long) tag,
 			slp->next, slp->prev, pring->postbufq_cnt);
 
@@ -11013,7 +10990,7 @@ lpfc_sli_ringpostbuf_get(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 	spin_unlock_irq(&phba->hbalock);
 	lpfc_printf_log(phba, KERN_ERR, LOG_INIT,
 			"0410 Cannot find virtual addr for mapped buf on "
-			"ring %d Data x%llx x%p x%p x%x\n",
+			"ring %d Data x%llx x%px x%px x%x\n",
 			pring->ringno, (unsigned long long)phys,
 			slp->next, slp->prev, pring->postbufq_cnt);
 	return NULL;
@@ -11068,7 +11045,7 @@ lpfc_sli_abort_els_cmpl(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 			abort_iocb = phba->sli.iocbq_lookup[abort_context];
 
 		lpfc_printf_log(phba, KERN_WARNING, LOG_ELS | LOG_SLI,
-				"0327 Cannot abort els iocb %p "
+				"0327 Cannot abort els iocb x%px "
 				"with tag %x context %x, abort status %x, "
 				"abort code %x\n",
 				abort_iocb, abort_iotag, abort_context,
@@ -11483,7 +11460,7 @@ lpfc_sli_abort_iocb(struct lpfc_vport *vport, struct lpfc_sli_ring *pring,
 	int i;
 
 	/* all I/Os are in process of being flushed */
-	if (phba->hba_flag & HBA_FCP_IOQ_FLUSH)
+	if (phba->hba_flag & HBA_IOQ_FLUSH)
 		return errcnt;
 
 	for (i = 1; i <= phba->sli.last_iotag; i++) {
@@ -11593,7 +11570,7 @@ lpfc_sli_abort_taskmgmt(struct lpfc_vport *vport, struct lpfc_sli_ring *pring,
 	spin_lock_irqsave(&phba->hbalock, iflags);
 
 	/* all I/Os are in process of being flushed */
-	if (phba->hba_flag & HBA_FCP_IOQ_FLUSH) {
+	if (phba->hba_flag & HBA_IOQ_FLUSH) {
 		spin_unlock_irqrestore(&phba->hbalock, iflags);
 		return 0;
 	}
@@ -11617,7 +11594,7 @@ lpfc_sli_abort_taskmgmt(struct lpfc_vport *vport, struct lpfc_sli_ring *pring,
 
 		if (phba->sli_rev == LPFC_SLI_REV4) {
 			pring_s4 =
-			    phba->sli4_hba.hdwq[iocbq->hba_wqidx].fcp_wq->pring;
+			    phba->sli4_hba.hdwq[iocbq->hba_wqidx].io_wq->pring;
 			if (!pring_s4) {
 				spin_unlock(&lpfc_cmd->buf_lock);
 				continue;
@@ -11758,7 +11735,10 @@ lpfc_sli_wake_iocb_wait(struct lpfc_hba *phba,
 		!(cmdiocbq->iocb_flag & LPFC_IO_LIBDFC)) {
 		lpfc_cmd = container_of(cmdiocbq, struct lpfc_io_buf,
 			cur_iocbq);
-		lpfc_cmd->exch_busy = rspiocbq->iocb_flag & LPFC_EXCHANGE_BUSY;
+		if (rspiocbq && (rspiocbq->iocb_flag & LPFC_EXCHANGE_BUSY))
+			lpfc_cmd->flags |= LPFC_SBUF_XBUSY;
+		else
+			lpfc_cmd->flags &= ~LPFC_SBUF_XBUSY;
 	}
 
 	pdone_q = cmdiocbq->context_un.wait_queue;
@@ -13180,13 +13160,19 @@ send_current_mbox:
 	phba->sli.sli_flag &= ~LPFC_SLI_MBOX_ACTIVE;
 	/* Setting active mailbox pointer need to be in sync to flag clear */
 	phba->sli.mbox_active = NULL;
+	if (bf_get(lpfc_trailer_consumed, mcqe))
+		lpfc_sli4_mq_release(phba->sli4_hba.mbx_wq);
 	spin_unlock_irqrestore(&phba->hbalock, iflags);
 	/* Wake up worker thread to post the next pending mailbox command */
 	lpfc_worker_wake_up(phba);
+	return workposted;
+
 out_no_mqe_complete:
+	spin_lock_irqsave(&phba->hbalock, iflags);
 	if (bf_get(lpfc_trailer_consumed, mcqe))
 		lpfc_sli4_mq_release(phba->sli4_hba.mbx_wq);
-	return workposted;
+	spin_unlock_irqrestore(&phba->hbalock, iflags);
+	return false;
 }
 
 /**
@@ -13326,8 +13312,13 @@ lpfc_sli4_sp_handle_abort_xri_wcqe(struct lpfc_hba *phba,
 	unsigned long iflags;
 
 	switch (cq->subtype) {
-	case LPFC_FCP:
-		lpfc_sli4_fcp_xri_aborted(phba, wcqe, cq->hdwq);
+	case LPFC_IO:
+		lpfc_sli4_io_xri_aborted(phba, wcqe, cq->hdwq);
+		if (phba->cfg_enable_fc4_type & LPFC_ENABLE_NVME) {
+			/* Notify aborted XRI for NVME work queue */
+			if (phba->nvmet_support)
+				lpfc_sli4_nvmet_xri_aborted(phba, wcqe);
+		}
 		workposted = false;
 		break;
 	case LPFC_NVME_LS: /* NVME LS uses ELS resources */
@@ -13344,15 +13335,6 @@ lpfc_sli4_sp_handle_abort_xri_wcqe(struct lpfc_hba *phba,
 		phba->hba_flag |= ELS_XRI_ABORT_EVENT;
 		spin_unlock_irqrestore(&phba->hbalock, iflags);
 		workposted = true;
-		break;
-	case LPFC_NVME:
-		/* Notify aborted XRI for NVME work queue */
-		if (phba->nvmet_support)
-			lpfc_sli4_nvmet_xri_aborted(phba, wcqe);
-		else
-			lpfc_sli4_nvme_xri_aborted(phba, wcqe, cq->hdwq);
-
-		workposted = false;
 		break;
 	default:
 		lpfc_printf_log(phba, KERN_ERR, LOG_SLI,
@@ -13604,14 +13586,9 @@ __lpfc_sli4_process_cq(struct lpfc_hba *phba, struct lpfc_queue *cq,
 		goto rearm_and_exit;
 
 	/* Process all the entries to the CQ */
+	cq->q_flag = 0;
 	cqe = lpfc_sli4_cq_get(cq);
 	while (cqe) {
-#if defined(CONFIG_SCSI_LPFC_DEBUG_FS) && defined(BUILD_NVME)
-		if (phba->ktime_on)
-			cq->isr_timestamp = ktime_get_ns();
-		else
-			cq->isr_timestamp = 0;
-#endif
 		workposted |= handler(phba, cq, cqe);
 		__lpfc_sli4_consume_cqe(phba, cq, cqe);
 
@@ -13624,6 +13601,9 @@ __lpfc_sli4_process_cq(struct lpfc_hba *phba, struct lpfc_queue *cq,
 						LPFC_QUEUE_NOARM);
 			consumed = 0;
 		}
+
+		if (count == LPFC_NVMET_CQ_NOTIFY)
+			cq->q_flag |= HBA_NVMET_CQ_NOTIFY;
 
 		cqe = lpfc_sli4_cq_get(cq);
 	}
@@ -13683,7 +13663,7 @@ __lpfc_sli4_sp_process_cq(struct lpfc_queue *cq)
 						&delay);
 		break;
 	case LPFC_WCQ:
-		if (cq->subtype == LPFC_FCP || cq->subtype == LPFC_NVME)
+		if (cq->subtype == LPFC_IO)
 			workposted |= __lpfc_sli4_process_cq(phba, cq,
 						lpfc_sli4_fp_handle_cqe,
 						&delay);
@@ -13940,10 +13920,10 @@ lpfc_sli4_nvmet_handle_rcqe(struct lpfc_hba *phba, struct lpfc_queue *cq,
 			goto drop;
 
 		if (fc_hdr->fh_type == FC_TYPE_FCP) {
-			dma_buf->bytes_recv = bf_get(lpfc_rcqe_length,  rcqe);
+			dma_buf->bytes_recv = bf_get(lpfc_rcqe_length, rcqe);
 			lpfc_nvmet_unsol_fcp_event(
-				phba, idx, dma_buf,
-				cq->isr_timestamp);
+				phba, idx, dma_buf, cq->isr_timestamp,
+				cq->q_flag & HBA_NVMET_CQ_NOTIFY);
 			return false;
 		}
 drop:
@@ -14000,10 +13980,7 @@ lpfc_sli4_fp_handle_cqe(struct lpfc_hba *phba, struct lpfc_queue *cq,
 		cq->CQ_wq++;
 		/* Process the WQ complete event */
 		phba->last_completion_time = jiffies;
-		if ((cq->subtype == LPFC_FCP) || (cq->subtype == LPFC_NVME))
-			lpfc_sli4_fp_handle_fcp_wcqe(phba, cq,
-				(struct lpfc_wcqe_complete *)&wcqe);
-		if (cq->subtype == LPFC_NVME_LS)
+		if (cq->subtype == LPFC_IO || cq->subtype == LPFC_NVME_LS)
 			lpfc_sli4_fp_handle_fcp_wcqe(phba, cq,
 				(struct lpfc_wcqe_complete *)&wcqe);
 		break;
@@ -14109,6 +14086,12 @@ process_cq:
 	}
 
 work_cq:
+#if defined(CONFIG_SCSI_LPFC_DEBUG_FS)
+	if (phba->ktime_on)
+		cq->isr_timestamp = ktime_get_ns();
+	else
+		cq->isr_timestamp = 0;
+#endif
 	if (!queue_work_on(cq->chann, phba->wq, &cq->irqwork))
 		lpfc_printf_log(phba, KERN_ERR, LOG_SLI,
 				"0363 Cannot schedule soft IRQ "
@@ -14235,7 +14218,7 @@ lpfc_sli4_hba_intr_handler(int irq, void *dev_id)
 		return IRQ_NONE;
 
 	/* Get to the EQ struct associated with this vector */
-	fpeq = phba->sli4_hba.hdwq[hba_eqidx].hba_eq;
+	fpeq = phba->sli4_hba.hba_eq_hdl[hba_eqidx].eq;
 	if (unlikely(!fpeq))
 		return IRQ_NONE;
 
@@ -14520,7 +14503,7 @@ lpfc_modify_hba_eq_delay(struct lpfc_hba *phba, uint32_t startq,
 	/* set values by EQ_DELAY register if supported */
 	if (phba->sli.sli_flag & LPFC_SLI_USE_EQDR) {
 		for (qidx = startq; qidx < phba->cfg_irq_chann; qidx++) {
-			eq = phba->sli4_hba.hdwq[qidx].hba_eq;
+			eq = phba->sli4_hba.hba_eq_hdl[qidx].eq;
 			if (!eq)
 				continue;
 
@@ -14529,7 +14512,6 @@ lpfc_modify_hba_eq_delay(struct lpfc_hba *phba, uint32_t startq,
 			if (++cnt >= numq)
 				break;
 		}
-
 		return;
 	}
 
@@ -14557,7 +14539,7 @@ lpfc_modify_hba_eq_delay(struct lpfc_hba *phba, uint32_t startq,
 		dmult = LPFC_DMULT_MAX;
 
 	for (qidx = startq; qidx < phba->cfg_irq_chann; qidx++) {
-		eq = phba->sli4_hba.hdwq[qidx].hba_eq;
+		eq = phba->sli4_hba.hba_eq_hdl[qidx].eq;
 		if (!eq)
 			continue;
 		eq->q_mode = usdelay;
@@ -14659,8 +14641,10 @@ lpfc_eq_create(struct lpfc_hba *phba, struct lpfc_queue *eq, uint32_t imax)
 		lpfc_printf_log(phba, KERN_ERR, LOG_SLI,
 				"0360 Unsupported EQ count. (%d)\n",
 				eq->entry_count);
-		if (eq->entry_count < 256)
-			return -EINVAL;
+		if (eq->entry_count < 256) {
+			status = -EINVAL;
+			goto out;
+		}
 		/* fall through - otherwise default to smallest count */
 	case 256:
 		bf_set(lpfc_eq_context_count, &eq_create->u.request.context,
@@ -14712,7 +14696,7 @@ lpfc_eq_create(struct lpfc_hba *phba, struct lpfc_queue *eq, uint32_t imax)
 	eq->host_index = 0;
 	eq->notify_interval = LPFC_EQ_NOTIFY_INTRVL;
 	eq->max_proc_limit = LPFC_EQ_MAX_PROC_LIMIT;
-
+out:
 	mempool_free(mbox, phba->mbox_mem_pool);
 	return status;
 }
@@ -16903,6 +16887,8 @@ lpfc_fc_frame_check(struct lpfc_hba *phba, struct fc_frame_header *fc_hdr)
 	struct fc_vft_header *fc_vft_hdr;
 	uint32_t *header = (uint32_t *) fc_hdr;
 
+#define FC_RCTL_MDS_DIAGS	0xF4
+
 	switch (fc_hdr->fh_r_ctl) {
 	case FC_RCTL_DD_UNCAT:		/* uncategorized information */
 	case FC_RCTL_DD_SOL_DATA:	/* solicited data */
@@ -17430,7 +17416,6 @@ lpfc_sli4_seq_abort_rsp(struct lpfc_vport *vport,
 	icmd->ulpContext = phba->sli4_hba.rpi_ids[ndlp->nlp_rpi];
 	ctiocb->context1 = lpfc_nlp_get(ndlp);
 
-	ctiocb->iocb_cmpl = NULL;
 	ctiocb->vport = phba->pport;
 	ctiocb->iocb_cmpl = lpfc_sli4_seq_abort_rsp_cmpl;
 	ctiocb->sli4_lxritag = NO_XRI;
@@ -17913,6 +17898,17 @@ lpfc_sli4_handle_received_buffer(struct lpfc_hba *phba,
 		fcfi = bf_get(lpfc_rcqe_fcf_id,
 			      &dmabuf->cq_event.cqe.rcqe_cmpl);
 
+	if (fc_hdr->fh_r_ctl == 0xF4 && fc_hdr->fh_type == 0xFF) {
+		vport = phba->pport;
+		lpfc_printf_log(phba, KERN_INFO, LOG_SLI,
+				"2023 MDS Loopback %d bytes\n",
+				bf_get(lpfc_rcqe_length,
+				       &dmabuf->cq_event.cqe.rcqe_cmpl));
+		/* Handle MDS Loopback frames */
+		lpfc_sli4_handle_mds_loopback(vport, dmabuf);
+		return;
+	}
+
 	/* d_id this frame is directed to */
 	did = sli4_did_from_fc_hdr(fc_hdr);
 
@@ -18193,9 +18189,20 @@ lpfc_sli4_alloc_rpi(struct lpfc_hba *phba)
 static void
 __lpfc_sli4_free_rpi(struct lpfc_hba *phba, int rpi)
 {
+	/*
+	 * if the rpi value indicates a prior unreg has already
+	 * been done, skip the unreg.
+	 */
+	if (rpi == LPFC_RPI_ALLOC_ERROR)
+		return;
+
 	if (test_and_clear_bit(rpi, phba->sli4_hba.rpi_bmask)) {
 		phba->sli4_hba.rpi_count--;
 		phba->sli4_hba.max_cfg_param.rpi_used--;
+	} else {
+		lpfc_printf_log(phba, KERN_INFO, LOG_SLI,
+				"2016 rpi %x not inuse\n",
+				rpi);
 	}
 }
 
@@ -19446,7 +19453,7 @@ lpfc_drain_txq(struct lpfc_hba *phba)
 
 	if (phba->link_flag & LS_MDS_LOOPBACK) {
 		/* MDS WQE are posted only to first WQ*/
-		wq = phba->sli4_hba.hdwq[0].fcp_wq;
+		wq = phba->sli4_hba.hdwq[0].io_wq;
 		if (unlikely(!wq))
 			return 0;
 		pring = wq->pring;
@@ -19697,10 +19704,10 @@ lpfc_sli4_issue_wqe(struct lpfc_hba *phba, struct lpfc_sli4_hdw_queue *qp,
 	/* NVME_FCREQ and NVME_ABTS requests */
 	if (pwqe->iocb_flag & LPFC_IO_NVME) {
 		/* Get the IO distribution (hba_wqidx) for WQ assignment. */
-		wq = qp->nvme_wq;
+		wq = qp->io_wq;
 		pring = wq->pring;
 
-		bf_set(wqe_cqid, &wqe->generic.wqe_com, qp->nvme_cq_map);
+		bf_set(wqe_cqid, &wqe->generic.wqe_com, qp->io_cq_map);
 
 		lpfc_qp_spin_lock_irqsave(&pring->ring_lock, iflags,
 					  qp, wq_access);
@@ -19717,7 +19724,7 @@ lpfc_sli4_issue_wqe(struct lpfc_hba *phba, struct lpfc_sli4_hdw_queue *qp,
 	/* NVMET requests */
 	if (pwqe->iocb_flag & LPFC_IO_NVMET) {
 		/* Get the IO distribution (hba_wqidx) for WQ assignment. */
-		wq = qp->nvme_wq;
+		wq = qp->io_wq;
 		pring = wq->pring;
 
 		ctxp = pwqe->context2;
@@ -19728,7 +19735,7 @@ lpfc_sli4_issue_wqe(struct lpfc_hba *phba, struct lpfc_sli4_hdw_queue *qp,
 		}
 		bf_set(wqe_xri_tag, &pwqe->wqe.xmit_bls_rsp.wqe_com,
 		       pwqe->sli4_xritag);
-		bf_set(wqe_cqid, &wqe->generic.wqe_com, qp->nvme_cq_map);
+		bf_set(wqe_cqid, &wqe->generic.wqe_com, qp->io_cq_map);
 
 		lpfc_qp_spin_lock_irqsave(&pring->ring_lock, iflags,
 					  qp, wq_access);
@@ -19775,9 +19782,7 @@ void lpfc_snapshot_mxp(struct lpfc_hba *phba, u32 hwqid)
 	if (multixri_pool->stat_snapshot_taken == LPFC_MXP_SNAPSHOT_TAKEN) {
 		pvt_pool = &qp->p_multixri_pool->pvt_pool;
 		pbl_pool = &qp->p_multixri_pool->pbl_pool;
-		txcmplq_cnt = qp->fcp_wq->pring->txcmplq_cnt;
-		if (qp->nvme_wq)
-			txcmplq_cnt += qp->nvme_wq->pring->txcmplq_cnt;
+		txcmplq_cnt = qp->io_wq->pring->txcmplq_cnt;
 
 		multixri_pool->stat_pbl_count = pbl_pool->count;
 		multixri_pool->stat_pvt_count = pvt_pool->count;
@@ -19847,12 +19852,9 @@ void lpfc_adjust_high_watermark(struct lpfc_hba *phba, u32 hwqid)
 	watermark_max = xri_limit;
 	watermark_min = xri_limit / 2;
 
-	txcmplq_cnt = qp->fcp_wq->pring->txcmplq_cnt;
+	txcmplq_cnt = qp->io_wq->pring->txcmplq_cnt;
 	abts_io_bufs = qp->abts_scsi_io_bufs;
-	if (qp->nvme_wq) {
-		txcmplq_cnt += qp->nvme_wq->pring->txcmplq_cnt;
-		abts_io_bufs += qp->abts_nvme_io_bufs;
-	}
+	abts_io_bufs += qp->abts_nvme_io_bufs;
 
 	new_watermark = txcmplq_cnt + abts_io_bufs;
 	new_watermark = min(watermark_max, new_watermark);
@@ -20106,6 +20108,13 @@ void lpfc_release_io_buf(struct lpfc_hba *phba, struct lpfc_io_buf *lpfc_ncmd,
 	lpfc_ncmd->cur_iocbq.wqe_cmpl = NULL;
 	lpfc_ncmd->cur_iocbq.iocb_cmpl = NULL;
 
+	if (phba->cfg_xpsgl && !phba->nvmet_support &&
+	    !list_empty(&lpfc_ncmd->dma_sgl_xtra_list))
+		lpfc_put_sgl_per_hdwq(phba, lpfc_ncmd);
+
+	if (!list_empty(&lpfc_ncmd->dma_cmd_rsp_list))
+		lpfc_put_cmd_rsp_buf_per_hdwq(phba, lpfc_ncmd);
+
 	if (phba->cfg_xri_rebalancing) {
 		if (lpfc_ncmd->expedite) {
 			/* Return to expedite pool */
@@ -20127,12 +20136,9 @@ void lpfc_release_io_buf(struct lpfc_hba *phba, struct lpfc_io_buf *lpfc_ncmd,
 		pbl_pool = &qp->p_multixri_pool->pbl_pool;
 		pvt_pool = &qp->p_multixri_pool->pvt_pool;
 
-		txcmplq_cnt = qp->fcp_wq->pring->txcmplq_cnt;
+		txcmplq_cnt = qp->io_wq->pring->txcmplq_cnt;
 		abts_io_bufs = qp->abts_scsi_io_bufs;
-		if (qp->nvme_wq) {
-			txcmplq_cnt += qp->nvme_wq->pring->txcmplq_cnt;
-			abts_io_bufs += qp->abts_nvme_io_bufs;
-		}
+		abts_io_bufs += qp->abts_nvme_io_bufs;
 
 		xri_owned = pvt_pool->count + txcmplq_cnt + abts_io_bufs;
 		xri_limit = qp->p_multixri_pool->xri_limit;
@@ -20386,4 +20392,295 @@ struct lpfc_io_buf *lpfc_get_io_buf(struct lpfc_hba *phba,
 	}
 
 	return lpfc_cmd;
+}
+
+/**
+ * lpfc_get_sgl_per_hdwq - Get one SGL chunk from hdwq's pool
+ * @phba: The HBA for which this call is being executed.
+ * @lpfc_buf: IO buf structure to append the SGL chunk
+ *
+ * This routine gets one SGL chunk buffer from hdwq's SGL chunk pool,
+ * and will allocate an SGL chunk if the pool is empty.
+ *
+ * Return codes:
+ *   NULL - Error
+ *   Pointer to sli4_hybrid_sgl - Success
+ **/
+struct sli4_hybrid_sgl *
+lpfc_get_sgl_per_hdwq(struct lpfc_hba *phba, struct lpfc_io_buf *lpfc_buf)
+{
+	struct sli4_hybrid_sgl *list_entry = NULL;
+	struct sli4_hybrid_sgl *tmp = NULL;
+	struct sli4_hybrid_sgl *allocated_sgl = NULL;
+	struct lpfc_sli4_hdw_queue *hdwq = lpfc_buf->hdwq;
+	struct list_head *buf_list = &hdwq->sgl_list;
+	unsigned long iflags;
+
+	spin_lock_irqsave(&hdwq->hdwq_lock, iflags);
+
+	if (likely(!list_empty(buf_list))) {
+		/* break off 1 chunk from the sgl_list */
+		list_for_each_entry_safe(list_entry, tmp,
+					 buf_list, list_node) {
+			list_move_tail(&list_entry->list_node,
+				       &lpfc_buf->dma_sgl_xtra_list);
+			break;
+		}
+	} else {
+		/* allocate more */
+		spin_unlock_irqrestore(&hdwq->hdwq_lock, iflags);
+		tmp = kmalloc_node(sizeof(*tmp), GFP_ATOMIC,
+				   cpu_to_node(hdwq->io_wq->chann));
+		if (!tmp) {
+			lpfc_printf_log(phba, KERN_INFO, LOG_SLI,
+					"8353 error kmalloc memory for HDWQ "
+					"%d %s\n",
+					lpfc_buf->hdwq_no, __func__);
+			return NULL;
+		}
+
+		tmp->dma_sgl = dma_pool_alloc(phba->lpfc_sg_dma_buf_pool,
+					      GFP_ATOMIC, &tmp->dma_phys_sgl);
+		if (!tmp->dma_sgl) {
+			lpfc_printf_log(phba, KERN_INFO, LOG_SLI,
+					"8354 error pool_alloc memory for HDWQ "
+					"%d %s\n",
+					lpfc_buf->hdwq_no, __func__);
+			kfree(tmp);
+			return NULL;
+		}
+
+		spin_lock_irqsave(&hdwq->hdwq_lock, iflags);
+		list_add_tail(&tmp->list_node, &lpfc_buf->dma_sgl_xtra_list);
+	}
+
+	allocated_sgl = list_last_entry(&lpfc_buf->dma_sgl_xtra_list,
+					struct sli4_hybrid_sgl,
+					list_node);
+
+	spin_unlock_irqrestore(&hdwq->hdwq_lock, iflags);
+
+	return allocated_sgl;
+}
+
+/**
+ * lpfc_put_sgl_per_hdwq - Put one SGL chunk into hdwq pool
+ * @phba: The HBA for which this call is being executed.
+ * @lpfc_buf: IO buf structure with the SGL chunk
+ *
+ * This routine puts one SGL chunk buffer into hdwq's SGL chunk pool.
+ *
+ * Return codes:
+ *   0 - Success
+ *   -EINVAL - Error
+ **/
+int
+lpfc_put_sgl_per_hdwq(struct lpfc_hba *phba, struct lpfc_io_buf *lpfc_buf)
+{
+	int rc = 0;
+	struct sli4_hybrid_sgl *list_entry = NULL;
+	struct sli4_hybrid_sgl *tmp = NULL;
+	struct lpfc_sli4_hdw_queue *hdwq = lpfc_buf->hdwq;
+	struct list_head *buf_list = &hdwq->sgl_list;
+	unsigned long iflags;
+
+	spin_lock_irqsave(&hdwq->hdwq_lock, iflags);
+
+	if (likely(!list_empty(&lpfc_buf->dma_sgl_xtra_list))) {
+		list_for_each_entry_safe(list_entry, tmp,
+					 &lpfc_buf->dma_sgl_xtra_list,
+					 list_node) {
+			list_move_tail(&list_entry->list_node,
+				       buf_list);
+		}
+	} else {
+		rc = -EINVAL;
+	}
+
+	spin_unlock_irqrestore(&hdwq->hdwq_lock, iflags);
+	return rc;
+}
+
+/**
+ * lpfc_free_sgl_per_hdwq - Free all SGL chunks of hdwq pool
+ * @phba: phba object
+ * @hdwq: hdwq to cleanup sgl buff resources on
+ *
+ * This routine frees all SGL chunks of hdwq SGL chunk pool.
+ *
+ * Return codes:
+ *   None
+ **/
+void
+lpfc_free_sgl_per_hdwq(struct lpfc_hba *phba,
+		       struct lpfc_sli4_hdw_queue *hdwq)
+{
+	struct list_head *buf_list = &hdwq->sgl_list;
+	struct sli4_hybrid_sgl *list_entry = NULL;
+	struct sli4_hybrid_sgl *tmp = NULL;
+	unsigned long iflags;
+
+	spin_lock_irqsave(&hdwq->hdwq_lock, iflags);
+
+	/* Free sgl pool */
+	list_for_each_entry_safe(list_entry, tmp,
+				 buf_list, list_node) {
+		dma_pool_free(phba->lpfc_sg_dma_buf_pool,
+			      list_entry->dma_sgl,
+			      list_entry->dma_phys_sgl);
+		list_del(&list_entry->list_node);
+		kfree(list_entry);
+	}
+
+	spin_unlock_irqrestore(&hdwq->hdwq_lock, iflags);
+}
+
+/**
+ * lpfc_get_cmd_rsp_buf_per_hdwq - Get one CMD/RSP buffer from hdwq
+ * @phba: The HBA for which this call is being executed.
+ * @lpfc_buf: IO buf structure to attach the CMD/RSP buffer
+ *
+ * This routine gets one CMD/RSP buffer from hdwq's CMD/RSP pool,
+ * and will allocate an CMD/RSP buffer if the pool is empty.
+ *
+ * Return codes:
+ *   NULL - Error
+ *   Pointer to fcp_cmd_rsp_buf - Success
+ **/
+struct fcp_cmd_rsp_buf *
+lpfc_get_cmd_rsp_buf_per_hdwq(struct lpfc_hba *phba,
+			      struct lpfc_io_buf *lpfc_buf)
+{
+	struct fcp_cmd_rsp_buf *list_entry = NULL;
+	struct fcp_cmd_rsp_buf *tmp = NULL;
+	struct fcp_cmd_rsp_buf *allocated_buf = NULL;
+	struct lpfc_sli4_hdw_queue *hdwq = lpfc_buf->hdwq;
+	struct list_head *buf_list = &hdwq->cmd_rsp_buf_list;
+	unsigned long iflags;
+
+	spin_lock_irqsave(&hdwq->hdwq_lock, iflags);
+
+	if (likely(!list_empty(buf_list))) {
+		/* break off 1 chunk from the list */
+		list_for_each_entry_safe(list_entry, tmp,
+					 buf_list,
+					 list_node) {
+			list_move_tail(&list_entry->list_node,
+				       &lpfc_buf->dma_cmd_rsp_list);
+			break;
+		}
+	} else {
+		/* allocate more */
+		spin_unlock_irqrestore(&hdwq->hdwq_lock, iflags);
+		tmp = kmalloc_node(sizeof(*tmp), GFP_ATOMIC,
+				   cpu_to_node(hdwq->io_wq->chann));
+		if (!tmp) {
+			lpfc_printf_log(phba, KERN_INFO, LOG_SLI,
+					"8355 error kmalloc memory for HDWQ "
+					"%d %s\n",
+					lpfc_buf->hdwq_no, __func__);
+			return NULL;
+		}
+
+		tmp->fcp_cmnd = dma_pool_alloc(phba->lpfc_cmd_rsp_buf_pool,
+						GFP_ATOMIC,
+						&tmp->fcp_cmd_rsp_dma_handle);
+
+		if (!tmp->fcp_cmnd) {
+			lpfc_printf_log(phba, KERN_INFO, LOG_SLI,
+					"8356 error pool_alloc memory for HDWQ "
+					"%d %s\n",
+					lpfc_buf->hdwq_no, __func__);
+			kfree(tmp);
+			return NULL;
+		}
+
+		tmp->fcp_rsp = (struct fcp_rsp *)((uint8_t *)tmp->fcp_cmnd +
+				sizeof(struct fcp_cmnd));
+
+		spin_lock_irqsave(&hdwq->hdwq_lock, iflags);
+		list_add_tail(&tmp->list_node, &lpfc_buf->dma_cmd_rsp_list);
+	}
+
+	allocated_buf = list_last_entry(&lpfc_buf->dma_cmd_rsp_list,
+					struct fcp_cmd_rsp_buf,
+					list_node);
+
+	spin_unlock_irqrestore(&hdwq->hdwq_lock, iflags);
+
+	return allocated_buf;
+}
+
+/**
+ * lpfc_put_cmd_rsp_buf_per_hdwq - Put one CMD/RSP buffer into hdwq pool
+ * @phba: The HBA for which this call is being executed.
+ * @lpfc_buf: IO buf structure with the CMD/RSP buf
+ *
+ * This routine puts one CMD/RSP buffer into executing CPU's CMD/RSP pool.
+ *
+ * Return codes:
+ *   0 - Success
+ *   -EINVAL - Error
+ **/
+int
+lpfc_put_cmd_rsp_buf_per_hdwq(struct lpfc_hba *phba,
+			      struct lpfc_io_buf *lpfc_buf)
+{
+	int rc = 0;
+	struct fcp_cmd_rsp_buf *list_entry = NULL;
+	struct fcp_cmd_rsp_buf *tmp = NULL;
+	struct lpfc_sli4_hdw_queue *hdwq = lpfc_buf->hdwq;
+	struct list_head *buf_list = &hdwq->cmd_rsp_buf_list;
+	unsigned long iflags;
+
+	spin_lock_irqsave(&hdwq->hdwq_lock, iflags);
+
+	if (likely(!list_empty(&lpfc_buf->dma_cmd_rsp_list))) {
+		list_for_each_entry_safe(list_entry, tmp,
+					 &lpfc_buf->dma_cmd_rsp_list,
+					 list_node) {
+			list_move_tail(&list_entry->list_node,
+				       buf_list);
+		}
+	} else {
+		rc = -EINVAL;
+	}
+
+	spin_unlock_irqrestore(&hdwq->hdwq_lock, iflags);
+	return rc;
+}
+
+/**
+ * lpfc_free_cmd_rsp_buf_per_hdwq - Free all CMD/RSP chunks of hdwq pool
+ * @phba: phba object
+ * @hdwq: hdwq to cleanup cmd rsp buff resources on
+ *
+ * This routine frees all CMD/RSP buffers of hdwq's CMD/RSP buf pool.
+ *
+ * Return codes:
+ *   None
+ **/
+void
+lpfc_free_cmd_rsp_buf_per_hdwq(struct lpfc_hba *phba,
+			       struct lpfc_sli4_hdw_queue *hdwq)
+{
+	struct list_head *buf_list = &hdwq->cmd_rsp_buf_list;
+	struct fcp_cmd_rsp_buf *list_entry = NULL;
+	struct fcp_cmd_rsp_buf *tmp = NULL;
+	unsigned long iflags;
+
+	spin_lock_irqsave(&hdwq->hdwq_lock, iflags);
+
+	/* Free cmd_rsp buf pool */
+	list_for_each_entry_safe(list_entry, tmp,
+				 buf_list,
+				 list_node) {
+		dma_pool_free(phba->lpfc_cmd_rsp_buf_pool,
+			      list_entry->fcp_cmnd,
+			      list_entry->fcp_cmd_rsp_dma_handle);
+		list_del(&list_entry->list_node);
+		kfree(list_entry);
+	}
+
+	spin_unlock_irqrestore(&hdwq->hdwq_lock, iflags);
 }

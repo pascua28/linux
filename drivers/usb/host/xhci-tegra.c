@@ -354,29 +354,6 @@ enum tegra_xusb_mbox_cmd {
 	MBOX_CMD_NAK
 };
 
-static const char * const mbox_cmd_name[] = {
-	[  1] = "MSG_ENABLE",
-	[  2] = "INC_FALCON_CLOCK",
-	[  3] = "DEC_FALCON_CLOCK",
-	[  4] = "INC_SSPI_CLOCK",
-	[  5] = "DEC_SSPI_CLOCK",
-	[  6] = "SET_BW",
-	[  7] = "SET_SS_PWR_GATING",
-	[  8] = "SET_SS_PWR_UNGATING",
-	[  9] = "SAVE_DFE_CTLE_CTX",
-	[ 10] = "AIRPLANE_MODE_ENABLED",
-	[ 11] = "AIRPLANE_MODE_DISABLED",
-	[ 12] = "START_HSIC_IDLE",
-	[ 13] = "STOP_HSIC_IDLE",
-	[ 14] = "DBC_WAKE_STACK",
-	[ 15] = "HSIC_PRETEND_CONNECT",
-	[ 16] = "RESET_SSPI",
-	[ 17] = "DISABLE_SS_LFPS_DETECTION",
-	[ 18] = "ENABLE_SS_LFPS_DETECTION",
-	[128] = "ACK",
-	[129] = "NAK",
-};
-
 struct tegra_xusb_mbox_msg {
 	u32 cmd;
 	u32 data;
@@ -778,7 +755,6 @@ static int tegra_xusb_runtime_suspend(struct device *dev)
 {
 	struct tegra_xusb *tegra = dev_get_drvdata(dev);
 
-	tegra_xusb_phy_disable(tegra);
 	regulator_bulk_disable(tegra->soc->num_supplies, tegra->supplies);
 	tegra_xusb_clk_disable(tegra);
 
@@ -802,16 +778,8 @@ static int tegra_xusb_runtime_resume(struct device *dev)
 		goto disable_clk;
 	}
 
-	err = tegra_xusb_phy_enable(tegra);
-	if (err < 0) {
-		dev_err(dev, "failed to enable PHYs: %d\n", err);
-		goto disable_regulator;
-	}
-
 	return 0;
 
-disable_regulator:
-	regulator_bulk_disable(tegra->soc->num_supplies, tegra->supplies);
 disable_clk:
 	tegra_xusb_clk_disable(tegra);
 	return err;
@@ -1204,6 +1172,12 @@ static int tegra_xusb_probe(struct platform_device *pdev)
 	 */
 	platform_set_drvdata(pdev, tegra);
 
+	err = tegra_xusb_phy_enable(tegra);
+	if (err < 0) {
+		dev_err(&pdev->dev, "failed to enable PHYs: %d\n", err);
+		goto put_hcd;
+	}
+
 	pm_runtime_enable(&pdev->dev);
 	if (pm_runtime_enabled(&pdev->dev))
 		err = pm_runtime_get_sync(&pdev->dev);
@@ -1212,10 +1186,20 @@ static int tegra_xusb_probe(struct platform_device *pdev)
 
 	if (err < 0) {
 		dev_err(&pdev->dev, "failed to enable device: %d\n", err);
-		goto disable_rpm;
+		goto disable_phy;
 	}
 
 	tegra_xusb_config(tegra, regs);
+
+	/*
+	 * The XUSB Falcon microcontroller can only address 40 bits, so set
+	 * the DMA mask accordingly.
+	 */
+	err = dma_set_mask_and_coherent(tegra->dev, DMA_BIT_MASK(40));
+	if (err < 0) {
+		dev_err(&pdev->dev, "failed to set DMA mask: %d\n", err);
+		goto put_rpm;
+	}
 
 	err = tegra_xusb_load_firmware(tegra);
 	if (err < 0) {
@@ -1288,9 +1272,11 @@ remove_usb2:
 put_rpm:
 	if (!pm_runtime_status_suspended(&pdev->dev))
 		tegra_xusb_runtime_suspend(&pdev->dev);
-disable_rpm:
-	pm_runtime_disable(&pdev->dev);
+put_hcd:
 	usb_put_hcd(tegra->hcd);
+disable_phy:
+	tegra_xusb_phy_disable(tegra);
+	pm_runtime_disable(&pdev->dev);
 put_powerdomains:
 	if (!of_property_read_bool(pdev->dev.of_node, "power-domains")) {
 		tegra_powergate_power_off(TEGRA_POWERGATE_XUSBC);
@@ -1326,6 +1312,8 @@ static int tegra_xusb_remove(struct platform_device *pdev)
 	} else {
 		tegra_xusb_powerdomain_remove(&pdev->dev, tegra);
 	}
+
+	tegra_xusb_phy_disable(tegra);
 
 	tegra_xusb_padctl_put(tegra->padctl);
 
@@ -1425,6 +1413,7 @@ MODULE_FIRMWARE("nvidia/tegra210/xusb.bin");
 
 static const char * const tegra186_supply_names[] = {
 };
+MODULE_FIRMWARE("nvidia/tegra186/xusb.bin");
 
 static const struct tegra_xusb_phy_type tegra186_phy_types[] = {
 	{ .name = "usb3", .num = 3, },

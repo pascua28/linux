@@ -290,10 +290,7 @@ static int spi_gpio_request(struct device *dev, struct spi_gpio *spi_gpio)
 		return PTR_ERR(spi_gpio->miso);
 
 	spi_gpio->sck = devm_gpiod_get(dev, "sck", GPIOD_OUT_LOW);
-	if (IS_ERR(spi_gpio->sck))
-		return PTR_ERR(spi_gpio->sck);
-
-	return 0;
+	return PTR_ERR_OR_ZERO(spi_gpio->sck);
 }
 
 #ifdef CONFIG_OF
@@ -374,8 +371,10 @@ static int spi_gpio_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	status = devm_add_action_or_reset(&pdev->dev, spi_gpio_put, master);
-	if (status)
+	if (status) {
+		spi_master_put(master);
 		return status;
+	}
 
 	if (of_id)
 		status = spi_gpio_probe_dt(pdev, master);
@@ -410,6 +409,12 @@ static int spi_gpio_probe(struct platform_device *pdev)
 
 	bb = &spi_gpio->bitbang;
 	bb->master = master;
+	/*
+	 * There is some additional business, apart from driving the CS GPIO
+	 * line, that we need to do on selection. This makes the local
+	 * callback for chipselect always get called.
+	 */
+	master->flags |= SPI_MASTER_GPIO_SS;
 	bb->chipselect = spi_gpio_chipselect;
 	bb->set_line_direction = spi_gpio_set_direction;
 

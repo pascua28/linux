@@ -75,7 +75,7 @@ int kvm_irq_delivery_to_apic(struct kvm *kvm, struct kvm_lapic *src,
 			if (r < 0)
 				r = 0;
 			r += kvm_apic_set_irq(vcpu, irq, dest_map);
-		} else if (kvm_lapic_enabled(vcpu)) {
+		} else if (kvm_apic_sw_enabled(vcpu->arch.apic)) {
 			if (!kvm_vector_hashing_enabled()) {
 				if (!lowest)
 					lowest = vcpu;
@@ -416,7 +416,7 @@ void kvm_scan_ioapic_routes(struct kvm_vcpu *vcpu,
 
 			kvm_set_msi_irq(vcpu->kvm, entry, &irq);
 
-			if (irq.level && kvm_apic_match_dest(vcpu, NULL, 0,
+			if (irq.trig_mode && kvm_apic_match_dest(vcpu, NULL, 0,
 						irq.dest_id, irq.dest_mode))
 				__set_bit(irq.vector, ioapic_handled_vectors);
 		}

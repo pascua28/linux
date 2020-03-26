@@ -21,6 +21,8 @@
 #include <linux/blk-mq.h>
 #include <linux/mount.h>
 #include <linux/dax.h>
+#include <linux/bio.h>
+#include <linux/keyslot-manager.h>
 
 #define DM_MSG_PREFIX "table"
 
@@ -163,10 +165,8 @@ static int alloc_targets(struct dm_table *t, unsigned int num)
 
 	/*
 	 * Allocate both the target array and offset array at once.
-	 * Append an empty entry to catch sectors beyond the end of
-	 * the device.
 	 */
-	n_highs = (sector_t *) dm_vcalloc(num + 1, sizeof(struct dm_target) +
+	n_highs = (sector_t *) dm_vcalloc(num, sizeof(struct dm_target) +
 					  sizeof(sector_t));
 	if (!n_highs)
 		return -ENOMEM;
@@ -881,16 +881,24 @@ void dm_table_set_type(struct dm_table *t, enum dm_queue_mode type)
 EXPORT_SYMBOL_GPL(dm_table_set_type);
 
 /* validate the dax capability of the target device span */
-static int device_supports_dax(struct dm_target *ti, struct dm_dev *dev,
-				       sector_t start, sector_t len, void *data)
+int device_supports_dax(struct dm_target *ti, struct dm_dev *dev,
+			sector_t start, sector_t len, void *data)
 {
 	int blocksize = *(int *) data;
 
 	return generic_fsdax_supported(dev->dax_dev, dev->bdev, blocksize,
-			start, len);
+				       start, len);
 }
 
-bool dm_table_supports_dax(struct dm_table *t, int blocksize)
+/* Check devices support synchronous DAX */
+static int device_dax_synchronous(struct dm_target *ti, struct dm_dev *dev,
+				  sector_t start, sector_t len, void *data)
+{
+	return dev->dax_dev && dax_synchronous(dev->dax_dev);
+}
+
+bool dm_table_supports_dax(struct dm_table *t,
+			   iterate_devices_callout_fn iterate_fn, int *blocksize)
 {
 	struct dm_target *ti;
 	unsigned i;
@@ -903,8 +911,7 @@ bool dm_table_supports_dax(struct dm_table *t, int blocksize)
 			return false;
 
 		if (!ti->type->iterate_devices ||
-		    !ti->type->iterate_devices(ti, device_supports_dax,
-			    &blocksize))
+		    !ti->type->iterate_devices(ti, iterate_fn, blocksize))
 			return false;
 	}
 
@@ -940,6 +947,7 @@ static int dm_table_determine_type(struct dm_table *t)
 	struct dm_target *tgt;
 	struct list_head *devices = dm_table_get_devices(t);
 	enum dm_queue_mode live_md_type = dm_get_md_type(t->md);
+	int page_size = PAGE_SIZE;
 
 	if (t->type != DM_TYPE_NONE) {
 		/* target already set the table's type */
@@ -984,7 +992,7 @@ static int dm_table_determine_type(struct dm_table *t)
 verify_bio_based:
 		/* We must use this table as bio-based */
 		t->type = DM_TYPE_BIO_BASED;
-		if (dm_table_supports_dax(t, PAGE_SIZE) ||
+		if (dm_table_supports_dax(t, device_supports_dax, &page_size) ||
 		    (list_empty(devices) && live_md_type == DM_TYPE_DAX_BIO_BASED)) {
 			t->type = DM_TYPE_DAX_BIO_BASED;
 		} else {
@@ -1334,7 +1342,7 @@ void dm_table_event(struct dm_table *t)
 }
 EXPORT_SYMBOL(dm_table_event);
 
-sector_t dm_table_get_size(struct dm_table *t)
+inline sector_t dm_table_get_size(struct dm_table *t)
 {
 	return t->num_targets ? (t->highs[t->num_targets - 1] + 1) : 0;
 }
@@ -1351,13 +1359,16 @@ struct dm_target *dm_table_get_target(struct dm_table *t, unsigned int index)
 /*
  * Search the btree for the correct target.
  *
- * Caller should check returned pointer with dm_target_is_valid()
+ * Caller should check returned pointer for NULL
  * to trap I/O beyond end of device.
  */
 struct dm_target *dm_table_find_target(struct dm_table *t, sector_t sector)
 {
 	unsigned int l, n = 0, k = 0;
 	sector_t *node;
+
+	if (unlikely(sector >= dm_table_get_size(t)))
+		return NULL;
 
 	for (l = 0; l < t->depth; l++) {
 		n = get_child(n, k);
@@ -1618,6 +1629,54 @@ static void dm_table_verify_integrity(struct dm_table *t)
 		blk_integrity_unregister(dm_disk(t->md));
 	}
 }
+
+#ifdef CONFIG_BLK_INLINE_ENCRYPTION
+static int device_intersect_crypto_modes(struct dm_target *ti,
+					 struct dm_dev *dev, sector_t start,
+					 sector_t len, void *data)
+{
+	struct keyslot_manager *parent = data;
+	struct keyslot_manager *child = bdev_get_queue(dev->bdev)->ksm;
+
+	keyslot_manager_intersect_modes(parent, child);
+	return 0;
+}
+
+/*
+ * Update the inline crypto modes supported by 'q->ksm' to be the intersection
+ * of the modes supported by all targets in the table.
+ *
+ * For any mode to be supported at all, all targets must have explicitly
+ * declared that they can pass through inline crypto support.  For a particular
+ * mode to be supported, all underlying devices must also support it.
+ *
+ * Assume that 'q->ksm' initially declares all modes to be supported.
+ */
+static void dm_calculate_supported_crypto_modes(struct dm_table *t,
+						struct request_queue *q)
+{
+	struct dm_target *ti;
+	unsigned int i;
+
+	for (i = 0; i < dm_table_get_num_targets(t); i++) {
+		ti = dm_table_get_target(t, i);
+
+		if (!ti->may_passthrough_inline_crypto) {
+			keyslot_manager_intersect_modes(q->ksm, NULL);
+			return;
+		}
+		if (!ti->type->iterate_devices)
+			continue;
+		ti->type->iterate_devices(ti, device_intersect_crypto_modes,
+					  q->ksm);
+	}
+}
+#else /* CONFIG_BLK_INLINE_ENCRYPTION */
+static inline void dm_calculate_supported_crypto_modes(struct dm_table *t,
+						       struct request_queue *q)
+{
+}
+#endif /* !CONFIG_BLK_INLINE_ENCRYPTION */
 
 static int device_flush_capable(struct dm_target *ti, struct dm_dev *dev,
 				sector_t start, sector_t len, void *data)
@@ -1883,6 +1942,7 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 			       struct queue_limits *limits)
 {
 	bool wc = false, fua = false;
+	int page_size = PAGE_SIZE;
 
 	/*
 	 * Copy table's limits to the DM device's request_queue
@@ -1910,8 +1970,11 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 	}
 	blk_queue_write_cache(q, wc, fua);
 
-	if (dm_table_supports_dax(t, PAGE_SIZE))
+	if (dm_table_supports_dax(t, device_supports_dax, &page_size)) {
 		blk_queue_flag_set(QUEUE_FLAG_DAX, q);
+		if (dm_table_supports_dax(t, device_dax_synchronous, NULL))
+			set_dax_synchronous(t->md->dax_dev);
+	}
 	else
 		blk_queue_flag_clear(QUEUE_FLAG_DAX, q);
 
@@ -1930,6 +1993,8 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 		q->limits.max_write_zeroes_sectors = 0;
 
 	dm_table_verify_integrity(t);
+
+	dm_calculate_supported_crypto_modes(t, q);
 
 	/*
 	 * Some devices don't use blk_integrity but still want stable pages
@@ -1952,12 +2017,14 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 	/*
 	 * For a zoned target, the number of zones should be updated for the
 	 * correct value to be exposed in sysfs queue/nr_zones. For a BIO based
-	 * target, this is all that is needed. For a request based target, the
-	 * queue zone bitmaps must also be updated.
-	 * Use blk_revalidate_disk_zones() to handle this.
+	 * target, this is all that is needed.
 	 */
-	if (blk_queue_is_zoned(q))
-		blk_revalidate_disk_zones(t->md->disk);
+#ifdef CONFIG_BLK_DEV_ZONED
+	if (blk_queue_is_zoned(q)) {
+		WARN_ON_ONCE(queue_is_mq(q));
+		q->nr_zones = blkdev_nr_zones(t->md->disk);
+	}
+#endif
 
 	/* Allow reads to exceed readahead limits */
 	q->backing_dev_info->io_pages = limits->max_sectors >> (PAGE_SHIFT - 9);

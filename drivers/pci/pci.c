@@ -123,6 +123,7 @@ bool pci_ats_disabled(void)
 {
 	return pcie_ats_disabled;
 }
+EXPORT_SYMBOL_GPL(pci_ats_disabled);
 
 /* Disable bridge_d3 for all PCIe ports */
 static bool pci_bridge_d3_disable;
@@ -777,6 +778,12 @@ static inline pci_power_t platform_pci_get_power_state(struct pci_dev *dev)
 	return pci_platform_pm ? pci_platform_pm->get_state(dev) : PCI_UNKNOWN;
 }
 
+static inline void platform_pci_refresh_power_state(struct pci_dev *dev)
+{
+	if (pci_platform_pm && pci_platform_pm->refresh_state)
+		pci_platform_pm->refresh_state(dev);
+}
+
 static inline pci_power_t platform_pci_choose_state(struct pci_dev *dev)
 {
 	return pci_platform_pm ?
@@ -884,8 +891,8 @@ static int pci_raw_set_power_state(struct pci_dev *dev, pci_power_t state)
 
 	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr);
 	dev->current_state = (pmcsr & PCI_PM_CTRL_STATE_MASK);
-	if (dev->current_state != state && printk_ratelimit())
-		pci_info(dev, "Refused to change power state, currently in D%d\n",
+	if (dev->current_state != state)
+		pci_info_ratelimited(dev, "Refused to change power state, currently in D%d\n",
 			 dev->current_state);
 
 	/*
@@ -938,16 +945,18 @@ void pci_update_current_state(struct pci_dev *dev, pci_power_t state)
 }
 
 /**
- * pci_power_up - Put the given device into D0 forcibly
- * @dev: PCI device to power up
+ * pci_refresh_power_state - Refresh the given device's power state data
+ * @dev: Target PCI device.
+ *
+ * Ask the platform to refresh the devices power state information and invoke
+ * pci_update_current_state() to update its current PCI power state.
  */
-void pci_power_up(struct pci_dev *dev)
+void pci_refresh_power_state(struct pci_dev *dev)
 {
 	if (platform_pci_power_manageable(dev))
-		platform_pci_set_power_state(dev, PCI_D0);
+		platform_pci_refresh_power_state(dev);
 
-	pci_raw_set_power_state(dev, PCI_D0);
-	pci_update_current_state(dev, PCI_D0);
+	pci_update_current_state(dev, dev->current_state);
 }
 
 /**
@@ -1131,6 +1140,17 @@ int pci_set_power_state(struct pci_dev *dev, pci_power_t state)
 	return error;
 }
 EXPORT_SYMBOL(pci_set_power_state);
+
+/**
+ * pci_power_up - Put the given device into D0 forcibly
+ * @dev: PCI device to power up
+ */
+void pci_power_up(struct pci_dev *dev)
+{
+	__pci_start_power_transition(dev, PCI_D0);
+	pci_raw_set_power_state(dev, PCI_D0);
+	pci_update_current_state(dev, PCI_D0);
+}
 
 /**
  * pci_choose_state - Choose the power state of a PCI device
@@ -1422,7 +1442,7 @@ static void pci_restore_rebar_state(struct pci_dev *pdev)
 		pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl);
 		bar_idx = ctrl & PCI_REBAR_CTRL_BAR_IDX;
 		res = pdev->resource + bar_idx;
-		size = order_base_2((resource_size(res) >> 20) | 1) - 1;
+		size = ilog2(resource_size(res)) - 20;
 		ctrl &= ~PCI_REBAR_CTRL_BAR_SIZE;
 		ctrl |= size << PCI_REBAR_CTRL_BAR_SHIFT;
 		pci_write_config_dword(pdev, pos + PCI_REBAR_CTRL, ctrl);
@@ -2065,6 +2085,13 @@ static void pci_pme_list_scan(struct work_struct *work)
 			 */
 			if (bridge && bridge->current_state != PCI_D0)
 				continue;
+			/*
+			 * If the device is in D3cold it should not be
+			 * polled either.
+			 */
+			if (pme_dev->dev->current_state == PCI_D3cold)
+				continue;
+
 			pci_pme_wakeup(pme_dev->dev, NULL);
 		} else {
 			list_del(&pme_dev->list);
@@ -2459,45 +2486,56 @@ bool pci_dev_run_wake(struct pci_dev *dev)
 EXPORT_SYMBOL_GPL(pci_dev_run_wake);
 
 /**
- * pci_dev_keep_suspended - Check if the device can stay in the suspended state.
+ * pci_dev_need_resume - Check if it is necessary to resume the device.
  * @pci_dev: Device to check.
  *
- * Return 'true' if the device is runtime-suspended, it doesn't have to be
+ * Return 'true' if the device is not runtime-suspended or it has to be
  * reconfigured due to wakeup settings difference between system and runtime
- * suspend and the current power state of it is suitable for the upcoming
- * (system) transition.
- *
- * If the device is not configured for system wakeup, disable PME for it before
- * returning 'true' to prevent it from waking up the system unnecessarily.
+ * suspend, or the current power state of it is not suitable for the upcoming
+ * (system-wide) transition.
  */
-bool pci_dev_keep_suspended(struct pci_dev *pci_dev)
+bool pci_dev_need_resume(struct pci_dev *pci_dev)
 {
 	struct device *dev = &pci_dev->dev;
-	bool wakeup = device_may_wakeup(dev);
+	pci_power_t target_state;
 
-	if (!pm_runtime_suspended(dev)
-	    || pci_target_state(pci_dev, wakeup) != pci_dev->current_state
-	    || platform_pci_need_resume(pci_dev))
-		return false;
+	if (!pm_runtime_suspended(dev) || platform_pci_need_resume(pci_dev))
+		return true;
+
+	target_state = pci_target_state(pci_dev, device_may_wakeup(dev));
 
 	/*
-	 * At this point the device is good to go unless it's been configured
-	 * to generate PME at the runtime suspend time, but it is not supposed
-	 * to wake up the system.  In that case, simply disable PME for it
-	 * (it will have to be re-enabled on exit from system resume).
-	 *
-	 * If the device's power state is D3cold and the platform check above
-	 * hasn't triggered, the device's configuration is suitable and we don't
-	 * need to manipulate it at all.
+	 * If the earlier platform check has not triggered, D3cold is just power
+	 * removal on top of D3hot, so no need to resume the device in that
+	 * case.
 	 */
+	return target_state != pci_dev->current_state &&
+		target_state != PCI_D3cold &&
+		pci_dev->current_state != PCI_D3hot;
+}
+
+/**
+ * pci_dev_adjust_pme - Adjust PME setting for a suspended device.
+ * @pci_dev: Device to check.
+ *
+ * If the device is suspended and it is not configured for system wakeup,
+ * disable PME for it to prevent it from waking up the system unnecessarily.
+ *
+ * Note that if the device's power state is D3cold and the platform check in
+ * pci_dev_need_resume() has not triggered, the device's configuration need not
+ * be changed.
+ */
+void pci_dev_adjust_pme(struct pci_dev *pci_dev)
+{
+	struct device *dev = &pci_dev->dev;
+
 	spin_lock_irq(&dev->power.lock);
 
-	if (pm_runtime_suspended(dev) && pci_dev->current_state < PCI_D3cold &&
-	    !wakeup)
+	if (pm_runtime_suspended(dev) && !device_may_wakeup(dev) &&
+	    pci_dev->current_state < PCI_D3cold)
 		__pci_pme_active(pci_dev, false);
 
 	spin_unlock_irq(&dev->power.lock);
-	return true;
 }
 
 /**
@@ -3542,7 +3580,7 @@ int pci_enable_atomic_ops_to_root(struct pci_dev *dev, u32 cap_mask)
 		}
 
 		/* Ensure upstream ports don't block AtomicOps on egress */
-		if (!bridge->has_secondary_link) {
+		if (pci_pcie_type(bridge) == PCI_EXP_TYPE_UPSTREAM) {
 			pcie_capability_read_dword(bridge, PCI_EXP_DEVCTL2,
 						   &ctl2);
 			if (ctl2 & PCI_EXP_DEVCTL2_ATOMIC_EGRESS_BLOCK)
@@ -4501,7 +4539,7 @@ static int pci_af_flr(struct pci_dev *dev, int probe)
 
 	/*
 	 * Wait for Transaction Pending bit to clear.  A word-aligned test
-	 * is used, so we use the conrol offset rather than status and shift
+	 * is used, so we use the control offset rather than status and shift
 	 * the test bit to match.
 	 */
 	if (!pci_wait_for_pending(dev, pos + PCI_AF_CTRL,
@@ -5621,7 +5659,9 @@ enum pci_bus_speed pcie_get_speed_cap(struct pci_dev *dev)
 	 */
 	pcie_capability_read_dword(dev, PCI_EXP_LNKCAP2, &lnkcap2);
 	if (lnkcap2) { /* PCIe r3.0-compliant */
-		if (lnkcap2 & PCI_EXP_LNKCAP2_SLS_16_0GB)
+		if (lnkcap2 & PCI_EXP_LNKCAP2_SLS_32_0GB)
+			return PCIE_SPEED_32_0GT;
+		else if (lnkcap2 & PCI_EXP_LNKCAP2_SLS_16_0GB)
 			return PCIE_SPEED_16_0GT;
 		else if (lnkcap2 & PCI_EXP_LNKCAP2_SLS_8_0GB)
 			return PCIE_SPEED_8_0GT;
@@ -5815,10 +5855,29 @@ int pci_set_vga_state(struct pci_dev *dev, bool decode,
 	return 0;
 }
 
+#ifdef CONFIG_ACPI
+bool pci_pr3_present(struct pci_dev *pdev)
+{
+	struct acpi_device *adev;
+
+	if (acpi_disabled)
+		return false;
+
+	adev = ACPI_COMPANION(&pdev->dev);
+	if (!adev)
+		return false;
+
+	return adev->power.flags.power_resources &&
+		acpi_has_method(adev->handle, "_PR3");
+}
+EXPORT_SYMBOL_GPL(pci_pr3_present);
+#endif
+
 /**
  * pci_add_dma_alias - Add a DMA devfn alias for a device
  * @dev: the PCI device for which alias is added
- * @devfn: alias slot and function
+ * @devfn_from: alias slot and function
+ * @nr_devfns: number of subsequent devfns to alias
  *
  * This helper encodes an 8-bit devfn as a bit number in dma_alias_mask
  * which is used to program permissible bus-devfn source addresses for DMA
@@ -5834,18 +5893,29 @@ int pci_set_vga_state(struct pci_dev *dev, bool decode,
  * cannot be left as a userspace activity).  DMA aliases should therefore
  * be configured via quirks, such as the PCI fixup header quirk.
  */
-void pci_add_dma_alias(struct pci_dev *dev, u8 devfn)
+void pci_add_dma_alias(struct pci_dev *dev, u8 devfn_from, unsigned nr_devfns)
 {
+	int devfn_to;
+
+	nr_devfns = min(nr_devfns, (unsigned) MAX_NR_DEVFNS - devfn_from);
+	devfn_to = devfn_from + nr_devfns - 1;
+
 	if (!dev->dma_alias_mask)
-		dev->dma_alias_mask = bitmap_zalloc(U8_MAX, GFP_KERNEL);
+		dev->dma_alias_mask = bitmap_zalloc(MAX_NR_DEVFNS, GFP_KERNEL);
 	if (!dev->dma_alias_mask) {
 		pci_warn(dev, "Unable to allocate DMA alias mask\n");
 		return;
 	}
 
-	set_bit(devfn, dev->dma_alias_mask);
-	pci_info(dev, "Enabling fixed DMA alias to %02x.%d\n",
-		 PCI_SLOT(devfn), PCI_FUNC(devfn));
+	bitmap_set(dev->dma_alias_mask, devfn_from, nr_devfns);
+
+	if (nr_devfns == 1)
+		pci_info(dev, "Enabling fixed DMA alias to %02x.%d\n",
+				PCI_SLOT(devfn_from), PCI_FUNC(devfn_from));
+	else if (nr_devfns > 1)
+		pci_info(dev, "Enabling fixed DMA alias for devfn range from %02x.%d to %02x.%d\n",
+				PCI_SLOT(devfn_from), PCI_FUNC(devfn_from),
+				PCI_SLOT(devfn_to), PCI_FUNC(devfn_to));
 }
 
 bool pci_devs_are_dma_aliases(struct pci_dev *dev1, struct pci_dev *dev2)
@@ -5882,8 +5952,19 @@ resource_size_t __weak pcibios_default_alignment(void)
 	return 0;
 }
 
-#define RESOURCE_ALIGNMENT_PARAM_SIZE COMMAND_LINE_SIZE
-static char resource_alignment_param[RESOURCE_ALIGNMENT_PARAM_SIZE] = {0};
+/*
+ * Arches that don't want to expose struct resource to userland as-is in
+ * sysfs and /proc can implement their own pci_resource_to_user().
+ */
+void __weak pci_resource_to_user(const struct pci_dev *dev, int bar,
+				 const struct resource *rsrc,
+				 resource_size_t *start, resource_size_t *end)
+{
+	*start = rsrc->start;
+	*end = rsrc->end;
+}
+
+static char *resource_alignment_param;
 static DEFINE_SPINLOCK(resource_alignment_lock);
 
 /**
@@ -5904,7 +5985,7 @@ static resource_size_t pci_specified_resource_alignment(struct pci_dev *dev,
 
 	spin_lock(&resource_alignment_lock);
 	p = resource_alignment_param;
-	if (!*p && !align)
+	if (!p || !*p)
 		goto out;
 	if (pci_has_flag(PCI_PROBE_ONLY)) {
 		align = 0;
@@ -6068,35 +6149,41 @@ void pci_reassigndev_resource_alignment(struct pci_dev *dev)
 	}
 }
 
-static ssize_t pci_set_resource_alignment_param(const char *buf, size_t count)
-{
-	if (count > RESOURCE_ALIGNMENT_PARAM_SIZE - 1)
-		count = RESOURCE_ALIGNMENT_PARAM_SIZE - 1;
-	spin_lock(&resource_alignment_lock);
-	strncpy(resource_alignment_param, buf, count);
-	resource_alignment_param[count] = '\0';
-	spin_unlock(&resource_alignment_lock);
-	return count;
-}
-
-static ssize_t pci_get_resource_alignment_param(char *buf, size_t size)
-{
-	size_t count;
-	spin_lock(&resource_alignment_lock);
-	count = snprintf(buf, size, "%s", resource_alignment_param);
-	spin_unlock(&resource_alignment_lock);
-	return count;
-}
-
 static ssize_t resource_alignment_show(struct bus_type *bus, char *buf)
 {
-	return pci_get_resource_alignment_param(buf, PAGE_SIZE);
+	size_t count = 0;
+
+	spin_lock(&resource_alignment_lock);
+	if (resource_alignment_param)
+		count = snprintf(buf, PAGE_SIZE, "%s", resource_alignment_param);
+	spin_unlock(&resource_alignment_lock);
+
+	/*
+	 * When set by the command line, resource_alignment_param will not
+	 * have a trailing line feed, which is ugly. So conditionally add
+	 * it here.
+	 */
+	if (count >= 2 && buf[count - 2] != '\n' && count < PAGE_SIZE - 1) {
+		buf[count - 1] = '\n';
+		buf[count++] = 0;
+	}
+
+	return count;
 }
 
 static ssize_t resource_alignment_store(struct bus_type *bus,
 					const char *buf, size_t count)
 {
-	return pci_set_resource_alignment_param(buf, count);
+	char *param = kstrndup(buf, count, GFP_KERNEL);
+
+	if (!param)
+		return -ENOMEM;
+
+	spin_lock(&resource_alignment_lock);
+	kfree(resource_alignment_param);
+	resource_alignment_param = param;
+	spin_unlock(&resource_alignment_lock);
+	return count;
 }
 
 static BUS_ATTR_RW(resource_alignment);
@@ -6225,8 +6312,7 @@ static int __init pci_setup(char *str)
 			} else if (!strncmp(str, "cbmemsize=", 10)) {
 				pci_cardbus_mem_size = memparse(str + 10, &str);
 			} else if (!strncmp(str, "resource_alignment=", 19)) {
-				pci_set_resource_alignment_param(str + 19,
-							strlen(str + 19));
+				resource_alignment_param = str + 19;
 			} else if (!strncmp(str, "ecrc=", 5)) {
 				pcie_ecrc_get_policy(str + 5);
 			} else if (!strncmp(str, "hpiosize=", 9)) {
@@ -6261,15 +6347,18 @@ static int __init pci_setup(char *str)
 early_param("pci", pci_setup);
 
 /*
- * 'disable_acs_redir_param' is initialized in pci_setup(), above, to point
- * to data in the __initdata section which will be freed after the init
- * sequence is complete. We can't allocate memory in pci_setup() because some
- * architectures do not have any memory allocation service available during
- * an early_param() call. So we allocate memory and copy the variable here
- * before the init section is freed.
+ * 'resource_alignment_param' and 'disable_acs_redir_param' are initialized
+ * in pci_setup(), above, to point to data in the __initdata section which
+ * will be freed after the init sequence is complete. We can't allocate memory
+ * in pci_setup() because some architectures do not have any memory allocation
+ * service available during an early_param() call. So we allocate memory and
+ * copy the variable here before the init section is freed.
+ *
  */
 static int __init pci_realloc_setup_params(void)
 {
+	resource_alignment_param = kstrdup(resource_alignment_param,
+					   GFP_KERNEL);
 	disable_acs_redir_param = kstrdup(disable_acs_redir_param, GFP_KERNEL);
 
 	return 0;

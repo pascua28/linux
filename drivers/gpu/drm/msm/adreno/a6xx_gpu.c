@@ -115,6 +115,7 @@ static void a6xx_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit,
 		case MSM_SUBMIT_CMD_CTX_RESTORE_BUF:
 			if (priv->lastctx == ctx)
 				break;
+			/* fall-thru */
 		case MSM_SUBMIT_CMD_BUF:
 			OUT_PKT7(ring, CP_INDIRECT_BUFFER_PFE, 3);
 			OUT_RING(ring, lower_32_bits(submit->cmd[i].iova));
@@ -391,6 +392,20 @@ static int a6xx_hw_init(struct msm_gpu *gpu)
 		REG_A6XX_RBBM_SECVID_TSB_TRUSTED_BASE_HI, 0x00000000);
 	gpu_write(gpu, REG_A6XX_RBBM_SECVID_TSB_TRUSTED_SIZE, 0x00000000);
 
+	/* Turn on 64 bit addressing for all blocks */
+	gpu_write(gpu, REG_A6XX_CP_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_VSC_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_GRAS_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_RB_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_PC_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_HLSQ_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_VFD_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_VPC_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_UCHE_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_SP_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_TPL1_ADDR_MODE_CNTL, 0x1);
+	gpu_write(gpu, REG_A6XX_RBBM_SECVID_TSB_ADDR_MODE_CNTL, 0x1);
+
 	/* enable hardware clockgating */
 	a6xx_set_hwcg(gpu, true);
 
@@ -522,12 +537,19 @@ static int a6xx_hw_init(struct msm_gpu *gpu)
 		a6xx_flush(gpu, gpu->rb[0]);
 		if (!a6xx_idle(gpu, gpu->rb[0]))
 			return -EINVAL;
-	} else {
-		/* Print a warning so if we die, we know why */
+	} else if (ret == -ENODEV) {
+		/*
+		 * This device does not use zap shader (but print a warning
+		 * just in case someone got their dt wrong.. hopefully they
+		 * have a debug UART to realize the error of their ways...
+		 * if you mess this up you are about to crash horribly)
+		 */
 		dev_warn_once(gpu->dev->dev,
 			"Zap shader not enabled - using SECVID_TRUST_CNTL instead\n");
 		gpu_write(gpu, REG_A6XX_RBBM_SECVID_TRUST_CNTL, 0x0);
 		ret = 0;
+	} else {
+		return ret;
 	}
 
 out:
@@ -854,7 +876,7 @@ struct msm_gpu *a6xx_gpu_init(struct drm_device *dev)
 	/* FIXME: How do we gracefully handle this? */
 	BUG_ON(!node);
 
-	ret = a6xx_gmu_probe(a6xx_gpu, node);
+	ret = a6xx_gmu_init(a6xx_gpu, node);
 	if (ret) {
 		a6xx_destroy(&(a6xx_gpu->base.base));
 		return ERR_PTR(ret);

@@ -196,16 +196,12 @@ EXPORT_SYMBOL(snd_ctl_notify);
 static int snd_ctl_new(struct snd_kcontrol **kctl, unsigned int count,
 		       unsigned int access, struct snd_ctl_file *file)
 {
-	unsigned int size;
 	unsigned int idx;
 
 	if (count == 0 || count > MAX_CONTROL_COUNT)
 		return -EINVAL;
 
-	size  = sizeof(struct snd_kcontrol);
-	size += sizeof(struct snd_kcontrol_volatile) * count;
-
-	*kctl = kzalloc(size, GFP_KERNEL);
+	*kctl = kzalloc(struct_size(*kctl, vd, count), GFP_KERNEL);
 	if (!*kctl)
 		return -ENOMEM;
 
@@ -1434,8 +1430,9 @@ static int call_tlv_handler(struct snd_ctl_file *file, int op_flag,
 	if (kctl->tlv.c == NULL)
 		return -ENXIO;
 
-	/* When locked, this is unavailable. */
-	if (vd->owner != NULL && vd->owner != file)
+	/* Write and command operations are not allowed for locked element. */
+	if (op_flag != SNDRV_CTL_TLV_OP_READ &&
+	    vd->owner != NULL && vd->owner != file)
 		return -EPERM;
 
 	return kctl->tlv.c(kctl, op_flag, size, buf);

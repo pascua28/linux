@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2005-2011 Atheros Communications Inc.
  * Copyright (c) 2011-2017 Qualcomm Atheros, Inc.
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  */
 #include "core.h"
 #include "debug.h"
@@ -210,6 +210,13 @@ static int ath10k_wmi_tlv_event_bcn_tx_status(struct ath10k *ar,
 
 	kfree(tb);
 	return 0;
+}
+
+static void ath10k_wmi_tlv_event_vdev_delete_resp(struct ath10k *ar,
+						  struct sk_buff *skb)
+{
+	ath10k_dbg(ar, ATH10K_DBG_WMI, "WMI_VDEV_DELETE_RESP_EVENTID\n");
+	complete(&ar->vdev_delete_done);
 }
 
 static int ath10k_wmi_tlv_event_diag_data(struct ath10k *ar,
@@ -458,6 +465,24 @@ static void ath10k_wmi_event_tdls_peer(struct ath10k *ar, struct sk_buff *skb)
 	kfree(tb);
 }
 
+static int ath10k_wmi_tlv_event_peer_delete_resp(struct ath10k *ar,
+						 struct sk_buff *skb)
+{
+	struct wmi_peer_delete_resp_ev_arg *arg;
+	struct wmi_tlv *tlv_hdr;
+
+	tlv_hdr = (struct wmi_tlv *)skb->data;
+	arg = (struct wmi_peer_delete_resp_ev_arg *)tlv_hdr->value;
+
+	ath10k_dbg(ar, ATH10K_DBG_WMI, "vdev id %d", arg->vdev_id);
+	ath10k_dbg(ar, ATH10K_DBG_WMI, "peer mac addr %pM", &arg->peer_addr);
+	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi tlv peer delete response\n");
+
+	complete(&ar->peer_delete_done);
+
+	return 0;
+}
+
 /***********/
 /* TLV ops */
 /***********/
@@ -513,6 +538,9 @@ static void ath10k_wmi_tlv_op_rx(struct ath10k *ar, struct sk_buff *skb)
 		break;
 	case WMI_TLV_VDEV_STOPPED_EVENTID:
 		ath10k_wmi_event_vdev_stopped(ar, skb);
+		break;
+	case WMI_TLV_VDEV_DELETE_RESP_EVENTID:
+		ath10k_wmi_tlv_event_vdev_delete_resp(ar, skb);
 		break;
 	case WMI_TLV_PEER_STA_KICKOUT_EVENTID:
 		ath10k_wmi_event_peer_sta_kickout(ar, skb);
@@ -606,6 +634,9 @@ static void ath10k_wmi_tlv_op_rx(struct ath10k *ar, struct sk_buff *skb)
 		break;
 	case WMI_TLV_TDLS_PEER_EVENTID:
 		ath10k_wmi_event_tdls_peer(ar, skb);
+		break;
+	case WMI_TLV_PEER_DELETE_RESP_EVENTID:
+		ath10k_wmi_tlv_event_peer_delete_resp(ar, skb);
 		break;
 	case WMI_TLV_MGMT_TX_COMPLETION_EVENTID:
 		ath10k_wmi_event_mgmt_tx_compl(ar, skb);
@@ -810,7 +841,7 @@ static int ath10k_wmi_tlv_op_pull_ch_info_ev(struct ath10k *ar,
 					     struct wmi_ch_info_ev_arg *arg)
 {
 	const void **tb;
-	const struct wmi_chan_info_event *ev;
+	const struct wmi_tlv_chan_info_event *ev;
 	int ret;
 
 	tb = ath10k_wmi_tlv_parse_alloc(ar, skb->data, skb->len, GFP_ATOMIC);
@@ -1905,6 +1936,28 @@ ath10k_wmi_tlv_op_gen_stop_scan(struct ath10k *ar,
 	return skb;
 }
 
+static int ath10k_wmi_tlv_op_get_vdev_subtype(struct ath10k *ar,
+					      enum wmi_vdev_subtype subtype)
+{
+	switch (subtype) {
+	case WMI_VDEV_SUBTYPE_NONE:
+		return WMI_TLV_VDEV_SUBTYPE_NONE;
+	case WMI_VDEV_SUBTYPE_P2P_DEVICE:
+		return WMI_TLV_VDEV_SUBTYPE_P2P_DEV;
+	case WMI_VDEV_SUBTYPE_P2P_CLIENT:
+		return WMI_TLV_VDEV_SUBTYPE_P2P_CLI;
+	case WMI_VDEV_SUBTYPE_P2P_GO:
+		return WMI_TLV_VDEV_SUBTYPE_P2P_GO;
+	case WMI_VDEV_SUBTYPE_PROXY_STA:
+		return WMI_TLV_VDEV_SUBTYPE_PROXY_STA;
+	case WMI_VDEV_SUBTYPE_MESH_11S:
+		return WMI_TLV_VDEV_SUBTYPE_MESH_11S;
+	case WMI_VDEV_SUBTYPE_MESH_NON_11S:
+		return -ENOTSUPP;
+	}
+	return -ENOTSUPP;
+}
+
 static struct sk_buff *
 ath10k_wmi_tlv_op_gen_vdev_create(struct ath10k *ar,
 				  u32 vdev_id,
@@ -2840,8 +2893,10 @@ ath10k_wmi_tlv_op_gen_mgmt_tx_send(struct ath10k *ar, struct sk_buff *msdu,
 	if ((ieee80211_is_action(hdr->frame_control) ||
 	     ieee80211_is_deauth(hdr->frame_control) ||
 	     ieee80211_is_disassoc(hdr->frame_control)) &&
-	     ieee80211_has_protected(hdr->frame_control))
+	     ieee80211_has_protected(hdr->frame_control)) {
+		skb_put(msdu, IEEE80211_CCMP_MIC_LEN);
 		buf_len += IEEE80211_CCMP_MIC_LEN;
+	}
 
 	buf_len = min_t(u32, buf_len, WMI_TLV_MGMT_TX_FRAME_MAX_LEN);
 	buf_len = round_up(buf_len, 4);
@@ -3595,6 +3650,7 @@ ath10k_wmi_tlv_op_gen_config_pno_start(struct ath10k *ar,
 	struct wmi_tlv *tlv;
 	struct sk_buff *skb;
 	__le32 *channel_list;
+	u16 tlv_len;
 	size_t len;
 	void *ptr;
 	u32 i;
@@ -3652,10 +3708,12 @@ ath10k_wmi_tlv_op_gen_config_pno_start(struct ath10k *ar,
 	/* nlo_configured_parameters(nlo_list) */
 	cmd->no_of_ssids = __cpu_to_le32(min_t(u8, pno->uc_networks_count,
 					       WMI_NLO_MAX_SSIDS));
+	tlv_len = __le32_to_cpu(cmd->no_of_ssids) *
+		sizeof(struct nlo_configured_parameters);
 
 	tlv = ptr;
 	tlv->tag = __cpu_to_le16(WMI_TLV_TAG_ARRAY_STRUCT);
-	tlv->len = __cpu_to_le16(len);
+	tlv->len = __cpu_to_le16(tlv_len);
 
 	ptr += sizeof(*tlv);
 	nlo_list = ptr;
@@ -4305,7 +4363,7 @@ static const struct wmi_ops wmi_tlv_ops = {
 	.gen_tdls_peer_update = ath10k_wmi_tlv_op_gen_tdls_peer_update,
 	.gen_adaptive_qcs = ath10k_wmi_tlv_op_gen_adaptive_qcs,
 	.fw_stats_fill = ath10k_wmi_main_op_fw_stats_fill,
-	.get_vdev_subtype = ath10k_wmi_op_get_vdev_subtype,
+	.get_vdev_subtype = ath10k_wmi_tlv_op_get_vdev_subtype,
 	.gen_echo = ath10k_wmi_tlv_op_gen_echo,
 	.gen_vdev_spectral_conf = ath10k_wmi_tlv_op_gen_vdev_spectral_conf,
 	.gen_vdev_spectral_enable = ath10k_wmi_tlv_op_gen_vdev_spectral_enable,

@@ -56,6 +56,7 @@ struct perf_guest_info_callbacks {
 #include <linux/perf_regs.h>
 #include <linux/cgroup.h>
 #include <linux/refcount.h>
+#include <linux/security.h>
 #include <asm/local.h>
 
 struct perf_callchain_entry {
@@ -246,6 +247,7 @@ struct perf_event;
 #define PERF_PMU_CAP_ITRACE			0x20
 #define PERF_PMU_CAP_HETEROGENEOUS_CPUS		0x40
 #define PERF_PMU_CAP_NO_EXCLUDE			0x80
+#define PERF_PMU_CAP_AUX_OUTPUT			0x100
 
 /**
  * struct pmu - generic performance monitoring unit
@@ -256,6 +258,7 @@ struct pmu {
 	struct module			*module;
 	struct device			*dev;
 	const struct attribute_group	**attr_groups;
+	const struct attribute_group	**attr_update;
 	const char			*name;
 	int				type;
 
@@ -290,7 +293,7 @@ struct pmu {
 	 *  -EBUSY	-- @event is for this PMU but PMU temporarily unavailable
 	 *  -EINVAL	-- @event is for this PMU but @event is not valid
 	 *  -EOPNOTSUPP -- @event is for this PMU, @event is valid, but not supported
-	 *  -EACCESS	-- @event is for this PMU, @event is valid, but no privilidges
+	 *  -EACCES	-- @event is for this PMU, @event is valid, but no privileges
 	 *
 	 *  0		-- @event is for this PMU and valid
 	 *
@@ -443,6 +446,16 @@ struct pmu {
 	 * caller provides necessary serialization.
 	 */
 	void (*addr_filters_sync)	(struct perf_event *event);
+					/* optional */
+
+	/*
+	 * Check if event can be used for aux_output purposes for
+	 * events of this PMU.
+	 *
+	 * Runs from perf_event_open(). Should return 0 for "no match"
+	 * or non-zero for "match".
+	 */
+	int (*aux_output_match)		(struct perf_event *event);
 					/* optional */
 
 	/*
@@ -680,6 +693,9 @@ struct perf_event {
 	struct perf_addr_filter_range	*addr_filter_ranges;
 	unsigned long			addr_filters_gen;
 
+	/* for aux_output events */
+	struct perf_event		*aux_event;
+
 	void (*destroy)(struct perf_event *);
 	struct rcu_head			rcu_head;
 
@@ -706,6 +722,9 @@ struct perf_event {
 	struct perf_cgroup		*cgrp; /* cgroup event is attach to */
 #endif
 
+#ifdef CONFIG_SECURITY
+	void *security;
+#endif
 	struct list_head		sb_list;
 #endif /* CONFIG_PERF_EVENTS */
 };
@@ -749,6 +768,11 @@ struct perf_event_context {
 	int				nr_stat;
 	int				nr_freq;
 	int				rotate_disable;
+	/*
+	 * Set when nr_events != nr_active, except tolerant to events not
+	 * necessary to be active due to scheduling constraints, such as cgroups.
+	 */
+	int				rotate_necessary;
 	refcount_t			refcount;
 	struct task_struct		*task;
 
@@ -1049,6 +1073,11 @@ static inline int in_software_context(struct perf_event *event)
 	return event->ctx->pmu->task_ctx_nr == perf_sw_context;
 }
 
+static inline int is_exclusive_pmu(struct pmu *pmu)
+{
+	return pmu->capabilities & PERF_PMU_CAP_EXCLUSIVE;
+}
+
 extern struct static_key perf_swevent_enabled[PERF_COUNT_SW_MAX];
 
 extern void ___perf_sw_event(u32, u64, struct pt_regs *, u64);
@@ -1216,19 +1245,41 @@ extern int perf_cpu_time_max_percent_handler(struct ctl_table *table, int write,
 int perf_event_max_stack_handler(struct ctl_table *table, int write,
 				 void __user *buffer, size_t *lenp, loff_t *ppos);
 
-static inline bool perf_paranoid_tracepoint_raw(void)
+/* Access to perf_event_open(2) syscall. */
+#define PERF_SECURITY_OPEN		0
+
+/* Finer grained perf_event_open(2) access control. */
+#define PERF_SECURITY_CPU		1
+#define PERF_SECURITY_KERNEL		2
+#define PERF_SECURITY_TRACEPOINT	3
+
+static inline int perf_is_paranoid(void)
 {
 	return sysctl_perf_event_paranoid > -1;
 }
 
-static inline bool perf_paranoid_cpu(void)
+static inline int perf_allow_kernel(struct perf_event_attr *attr)
 {
-	return sysctl_perf_event_paranoid > 0;
+	if (sysctl_perf_event_paranoid > 1 && !capable(CAP_SYS_ADMIN))
+		return -EACCES;
+
+	return security_perf_event_open(attr, PERF_SECURITY_KERNEL);
 }
 
-static inline bool perf_paranoid_kernel(void)
+static inline int perf_allow_cpu(struct perf_event_attr *attr)
 {
-	return sysctl_perf_event_paranoid > 1;
+	if (sysctl_perf_event_paranoid > 0 && !capable(CAP_SYS_ADMIN))
+		return -EACCES;
+
+	return security_perf_event_open(attr, PERF_SECURITY_CPU);
+}
+
+static inline int perf_allow_tracepoint(struct perf_event_attr *attr)
+{
+	if (sysctl_perf_event_paranoid > -1 && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	return security_perf_event_open(attr, PERF_SECURITY_TRACEPOINT);
 }
 
 extern void perf_event_init(void);

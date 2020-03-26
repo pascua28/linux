@@ -461,10 +461,8 @@ static ssize_t rdtgroup_cpus_write(struct kernfs_open_file *of,
 	}
 
 	rdtgrp = rdtgroup_kn_lock_live(of->kn);
-	rdt_last_cmd_clear();
 	if (!rdtgrp) {
 		ret = -ENOENT;
-		rdt_last_cmd_puts("Directory was removed\n");
 		goto unlock;
 	}
 
@@ -1743,15 +1741,15 @@ static int set_cache_qos_cfg(int level, bool enable)
 	struct rdt_domain *d;
 	int cpu;
 
-	if (!zalloc_cpumask_var(&cpu_mask, GFP_KERNEL))
-		return -ENOMEM;
-
 	if (level == RDT_RESOURCE_L3)
 		update = l3_qos_cfg_update;
 	else if (level == RDT_RESOURCE_L2)
 		update = l2_qos_cfg_update;
 	else
 		return -EINVAL;
+
+	if (!zalloc_cpumask_var(&cpu_mask, GFP_KERNEL))
+		return -ENOMEM;
 
 	r_l = &rdt_resources_all[level];
 	list_for_each_entry(d, &r_l->domains, list) {
@@ -1972,7 +1970,7 @@ static int rdt_get_tree(struct fs_context *fc)
 
 	if (rdt_mon_capable) {
 		ret = mongroup_create_dir(rdtgroup_default.kn,
-					  NULL, "mon_groups",
+					  &rdtgroup_default, "mon_groups",
 					  &kn_mongrp);
 		if (ret < 0)
 			goto out_info;
@@ -2104,8 +2102,7 @@ static int rdt_init_fs_context(struct fs_context *fc)
 	ctx->kfc.magic = RDTGROUP_SUPER_MAGIC;
 	fc->fs_private = &ctx->kfc;
 	fc->ops = &rdt_fs_context_ops;
-	if (fc->user_ns)
-		put_user_ns(fc->user_ns);
+	put_user_ns(fc->user_ns);
 	fc->user_ns = get_user_ns(&init_user_ns);
 	fc->global = true;
 	return 0;
@@ -2208,7 +2205,11 @@ static void free_all_child_rdtgrp(struct rdtgroup *rdtgrp)
 	list_for_each_entry_safe(sentry, stmp, head, mon.crdtgrp_list) {
 		free_rmid(sentry->mon.rmid);
 		list_del(&sentry->mon.crdtgrp_list);
-		kfree(sentry);
+
+		if (atomic_read(&sentry->waitcount) != 0)
+			sentry->flags = RDT_DELETED;
+		else
+			kfree(sentry);
 	}
 }
 
@@ -2246,7 +2247,11 @@ static void rmdir_all_sub(void)
 
 		kernfs_remove(rdtgrp->kn);
 		list_del(&rdtgrp->rdtgroup_list);
-		kfree(rdtgrp);
+
+		if (atomic_read(&rdtgrp->waitcount) != 0)
+			rdtgrp->flags = RDT_DELETED;
+		else
+			kfree(rdtgrp);
 	}
 	/* Notify online CPUs to update per cpu storage and PQR_ASSOC MSR */
 	update_closid_rmid(cpu_online_mask, &rdtgroup_default);
@@ -2449,7 +2454,7 @@ static int mkdir_mondata_all(struct kernfs_node *parent_kn,
 	/*
 	 * Create the mon_data directory first.
 	 */
-	ret = mongroup_create_dir(parent_kn, NULL, "mon_data", &kn);
+	ret = mongroup_create_dir(parent_kn, prgrp, "mon_data", &kn);
 	if (ret)
 		return ret;
 
@@ -2488,21 +2493,21 @@ out_destroy:
  * modification to the CBM if the default does not satisfy the
  * requirements.
  */
-static void cbm_ensure_valid(u32 *_val, struct rdt_resource *r)
+static u32 cbm_ensure_valid(u32 _val, struct rdt_resource *r)
 {
-	unsigned long val = *_val;
 	unsigned int cbm_len = r->cache.cbm_len;
 	unsigned long first_bit, zero_bit;
+	unsigned long val = _val;
 
-	if (val == 0)
-		return;
+	if (!val)
+		return 0;
 
 	first_bit = find_first_bit(&val, cbm_len);
 	zero_bit = find_next_zero_bit(&val, cbm_len, first_bit);
 
 	/* Clear any remaining bits to ensure contiguous region */
 	bitmap_clear(&val, zero_bit, cbm_len - zero_bit);
-	*_val = (u32)val;
+	return (u32)val;
 }
 
 /*
@@ -2560,7 +2565,7 @@ static int __init_one_rdt_domain(struct rdt_domain *d, struct rdt_resource *r,
 	 * Force the initial CBM to be valid, user can
 	 * modify the CBM based on system availability.
 	 */
-	cbm_ensure_valid(&d->new_ctrl, r);
+	d->new_ctrl = cbm_ensure_valid(d->new_ctrl, r);
 	/*
 	 * Assign the u32 CBM to an unsigned long to ensure that
 	 * bitmap_weight() does not access out-of-bound memory.
@@ -2648,11 +2653,9 @@ static int mkdir_rdt_prepare(struct kernfs_node *parent_kn,
 	uint files = 0;
 	int ret;
 
-	prdtgrp = rdtgroup_kn_lock_live(prgrp_kn);
-	rdt_last_cmd_clear();
+	prdtgrp = rdtgroup_kn_lock_live(parent_kn);
 	if (!prdtgrp) {
 		ret = -ENODEV;
-		rdt_last_cmd_puts("Directory was removed\n");
 		goto out_unlock;
 	}
 
@@ -2723,7 +2726,7 @@ static int mkdir_rdt_prepare(struct kernfs_node *parent_kn,
 	kernfs_activate(kn);
 
 	/*
-	 * The caller unlocks the prgrp_kn upon success.
+	 * The caller unlocks the parent_kn upon success.
 	 */
 	return 0;
 
@@ -2734,7 +2737,7 @@ out_destroy:
 out_free_rgrp:
 	kfree(rdtgrp);
 out_unlock:
-	rdtgroup_kn_unlock(prgrp_kn);
+	rdtgroup_kn_unlock(parent_kn);
 	return ret;
 }
 
@@ -2772,7 +2775,7 @@ static int rdtgroup_mkdir_mon(struct kernfs_node *parent_kn,
 	 */
 	list_add_tail(&rdtgrp->mon.crdtgrp_list, &prgrp->mon.crdtgrp_list);
 
-	rdtgroup_kn_unlock(prgrp_kn);
+	rdtgroup_kn_unlock(parent_kn);
 	return ret;
 }
 
@@ -2815,7 +2818,7 @@ static int rdtgroup_mkdir_ctrl_mon(struct kernfs_node *parent_kn,
 		 * Create an empty mon_groups directory to hold the subset
 		 * of tasks and cpus to monitor.
 		 */
-		ret = mongroup_create_dir(kn, NULL, "mon_groups", NULL);
+		ret = mongroup_create_dir(kn, rdtgrp, "mon_groups", NULL);
 		if (ret) {
 			rdt_last_cmd_puts("kernfs subdir error\n");
 			goto out_del_list;
@@ -2831,7 +2834,7 @@ out_id_free:
 out_common_fail:
 	mkdir_rdt_prepare_clean(rdtgrp);
 out_unlock:
-	rdtgroup_kn_unlock(prgrp_kn);
+	rdtgroup_kn_unlock(parent_kn);
 	return ret;
 }
 
@@ -2957,12 +2960,12 @@ static int rdtgroup_rmdir_ctrl(struct kernfs_node *kn, struct rdtgroup *rdtgrp,
 	closid_free(rdtgrp->closid);
 	free_rmid(rdtgrp->mon.rmid);
 
+	rdtgroup_ctrl_remove(kn, rdtgrp);
+
 	/*
 	 * Free all the child monitor group rmids.
 	 */
 	free_all_child_rdtgrp(rdtgrp);
-
-	rdtgroup_ctrl_remove(kn, rdtgrp);
 
 	return 0;
 }

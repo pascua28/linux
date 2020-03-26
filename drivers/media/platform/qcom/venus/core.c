@@ -198,7 +198,7 @@ static int venus_enumerate_codecs(struct venus_core *core, u32 type)
 		goto err;
 
 	for (i = 0; i < MAX_CODEC_NUM; i++) {
-		codec = (1 << i) & codecs;
+		codec = (1UL << i) & codecs;
 		if (!codec)
 			continue;
 
@@ -427,10 +427,11 @@ static const struct venus_resources msm8916_res = {
 };
 
 static const struct freq_tbl msm8996_freq_table[] = {
-	{ 1944000, 490000000 },	/* 4k UHD @ 60 */
-	{  972000, 320000000 },	/* 4k UHD @ 30 */
-	{  489600, 150000000 },	/* 1080p @ 60 */
-	{  244800,  75000000 },	/* 1080p @ 30 */
+	{ 1944000, 520000000 },	/* 4k UHD @ 60 (decode only) */
+	{  972000, 520000000 },	/* 4k UHD @ 30 */
+	{  489600, 346666667 },	/* 1080p @ 60 */
+	{  244800, 150000000 },	/* 1080p @ 30 */
+	{  108000,  75000000 },	/* 720p @ 30 */
 };
 
 static const struct reg_val msm8996_reg_preset[] = {
@@ -446,7 +447,7 @@ static const struct venus_resources msm8996_res = {
 	.reg_tbl_size = ARRAY_SIZE(msm8996_reg_preset),
 	.clks = {"core", "iface", "bus", "mbus" },
 	.clks_num = 4,
-	.max_load = 3110400,	/* 4096x2160@90 */
+	.max_load = 2563200,
 	.hfi_version = HFI_VERSION_3XX,
 	.vmem_id = VIDC_RESOURCE_NONE,
 	.vmem_size = 0,
@@ -469,7 +470,7 @@ static const struct venus_resources sdm845_res = {
 	.freq_tbl_size = ARRAY_SIZE(sdm845_freq_table),
 	.clks = {"core", "iface", "bus" },
 	.clks_num = 3,
-	.max_load = 2563200,
+	.max_load = 3110400,	/* 4096x2160@90 */
 	.hfi_version = HFI_VERSION_4XX,
 	.vmem_id = VIDC_RESOURCE_NONE,
 	.vmem_size = 0,

@@ -79,6 +79,8 @@ static struct sk_buff *esp6_gro_receive(struct list_head *head,
 		if (!x)
 			goto out_reset;
 
+		skb->mark = xfrm_smark_get(skb->mark, x);
+
 		sp->xvec[sp->len++] = x;
 		sp->olen++;
 
@@ -336,9 +338,7 @@ static int __init esp6_offload_init(void)
 
 static void __exit esp6_offload_exit(void)
 {
-	if (xfrm_unregister_type_offload(&esp6_type_offload, AF_INET6) < 0)
-		pr_info("%s: can't remove xfrm type offload\n", __func__);
-
+	xfrm_unregister_type_offload(&esp6_type_offload, AF_INET6);
 	inet6_del_offload(&esp6_offload, IPPROTO_ESP);
 }
 

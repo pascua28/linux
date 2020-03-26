@@ -148,6 +148,11 @@ int skcipher_walk_aead_decrypt(struct skcipher_walk *walk,
 			       struct aead_request *req, bool atomic);
 void skcipher_walk_complete(struct skcipher_walk *walk, int err);
 
+static inline void skcipher_walk_abort(struct skcipher_walk *walk)
+{
+	skcipher_walk_done(walk, -ECANCELED);
+}
+
 static inline void ablkcipher_request_complete(struct ablkcipher_request *req,
 					       int err)
 {
@@ -198,6 +203,36 @@ static inline unsigned int crypto_skcipher_alg_max_keysize(
 		return alg->base.cra_ablkcipher.max_keysize;
 
 	return alg->max_keysize;
+}
+
+static inline unsigned int crypto_skcipher_alg_walksize(
+	struct skcipher_alg *alg)
+{
+	if ((alg->base.cra_flags & CRYPTO_ALG_TYPE_MASK) ==
+	    CRYPTO_ALG_TYPE_BLKCIPHER)
+		return alg->base.cra_blocksize;
+
+	if (alg->base.cra_ablkcipher.encrypt)
+		return alg->base.cra_blocksize;
+
+	return alg->walksize;
+}
+
+/**
+ * crypto_skcipher_walksize() - obtain walk size
+ * @tfm: cipher handle
+ *
+ * In some cases, algorithms can only perform optimally when operating on
+ * multiple blocks in parallel. This is reflected by the walksize, which
+ * must be a multiple of the chunksize (or equal if the concern does not
+ * apply)
+ *
+ * Return: walk size in bytes
+ */
+static inline unsigned int crypto_skcipher_walksize(
+	struct crypto_skcipher *tfm)
+{
+	return crypto_skcipher_alg_walksize(crypto_skcipher_alg(tfm));
 }
 
 /* Helpers for simple block cipher modes of operation */

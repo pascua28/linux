@@ -13,11 +13,14 @@
 
 #include <linux/spinlock_types.h>
 #include <linux/log2.h>
+#include <linux/hashtable.h>
 
 #include "context.h"
 
 struct sidtab_entry_leaf {
+	u32 sid;
 	struct context context;
+	struct hlist_node list;
 };
 
 struct sidtab_node_inner;
@@ -40,8 +43,8 @@ union sidtab_entry_inner {
 #define SIDTAB_LEAF_ENTRIES \
 	(SIDTAB_NODE_ALLOC_SIZE / sizeof(struct sidtab_entry_leaf))
 
-#define SIDTAB_MAX_BITS 31 /* limited to INT_MAX due to atomic_t range */
-#define SIDTAB_MAX (((u32)1 << SIDTAB_MAX_BITS) - 1)
+#define SIDTAB_MAX_BITS 32
+#define SIDTAB_MAX U32_MAX
 /* ensure enough tree levels for SIDTAB_MAX entries */
 #define SIDTAB_MAX_LEVEL \
 	DIV_ROUND_UP(SIDTAB_MAX_BITS - size_to_shift(SIDTAB_LEAF_ENTRIES), \
@@ -57,7 +60,7 @@ struct sidtab_node_inner {
 
 struct sidtab_isid_entry {
 	int set;
-	struct context context;
+	struct sidtab_entry_leaf leaf;
 };
 
 struct sidtab_convert_params {
@@ -66,19 +69,29 @@ struct sidtab_convert_params {
 	struct sidtab *target;
 };
 
-#define SIDTAB_RCACHE_SIZE 3
+#define SIDTAB_HASH_BITS CONFIG_SECURITY_SELINUX_SIDTAB_HASH_BITS
+#define SIDTAB_HASH_BUCKETS (1 << SIDTAB_HASH_BITS)
 
 struct sidtab {
+	/*
+	 * lock-free read access only for as many items as a prior read of
+	 * 'count'
+	 */
 	union sidtab_entry_inner roots[SIDTAB_MAX_LEVEL + 1];
-	atomic_t count;
+	/*
+	 * access atomically via {READ|WRITE}_ONCE(); only increment under
+	 * spinlock
+	 */
+	u32 count;
+	/* access only under spinlock */
 	struct sidtab_convert_params *convert;
 	spinlock_t lock;
 
-	/* reverse lookup cache */
-	atomic_t rcache[SIDTAB_RCACHE_SIZE];
-
 	/* index == SID - 1 (no entry for SECSID_NULL) */
 	struct sidtab_isid_entry isids[SECINITSID_NUM];
+
+	/* Hash table for fast reverse context-to-sid lookups. */
+	DECLARE_HASHTABLE(context_to_sid, SIDTAB_HASH_BITS);
 };
 
 int sidtab_init(struct sidtab *s);
@@ -91,6 +104,8 @@ int sidtab_convert(struct sidtab *s, struct sidtab_convert_params *params);
 int sidtab_context_to_sid(struct sidtab *s, struct context *context, u32 *sid);
 
 void sidtab_destroy(struct sidtab *s);
+
+int sidtab_hash_stats(struct sidtab *sidtab, char *page);
 
 #endif	/* _SS_SIDTAB_H_ */
 

@@ -1299,7 +1299,7 @@ static int hugetlbfs_get_tree(struct fs_context *fc)
 	int err = hugetlbfs_validate(fc);
 	if (err)
 		return err;
-	return vfs_get_super(fc, vfs_get_independent_super, hugetlbfs_fill_super);
+	return get_tree_nodev(fc, hugetlbfs_fill_super);
 }
 
 static void hugetlbfs_fs_context_free(struct fs_context *fc)
@@ -1461,28 +1461,43 @@ static int __init init_hugetlbfs_fs(void)
 					sizeof(struct hugetlbfs_inode_info),
 					0, SLAB_ACCOUNT, init_once);
 	if (hugetlbfs_inode_cachep == NULL)
-		goto out2;
+		goto out;
 
 	error = register_filesystem(&hugetlbfs_fs_type);
 	if (error)
-		goto out;
+		goto out_free;
 
+	/* default hstate mount is required */
+	mnt = mount_one_hugetlbfs(&hstates[default_hstate_idx]);
+	if (IS_ERR(mnt)) {
+		error = PTR_ERR(mnt);
+		goto out_unreg;
+	}
+	hugetlbfs_vfsmount[default_hstate_idx] = mnt;
+
+	/* other hstates are optional */
 	i = 0;
 	for_each_hstate(h) {
-		mnt = mount_one_hugetlbfs(h);
-		if (IS_ERR(mnt) && i == 0) {
-			error = PTR_ERR(mnt);
-			goto out;
+		if (i == default_hstate_idx) {
+			i++;
+			continue;
 		}
-		hugetlbfs_vfsmount[i] = mnt;
+
+		mnt = mount_one_hugetlbfs(h);
+		if (IS_ERR(mnt))
+			hugetlbfs_vfsmount[i] = NULL;
+		else
+			hugetlbfs_vfsmount[i] = mnt;
 		i++;
 	}
 
 	return 0;
 
- out:
+ out_unreg:
+	(void)unregister_filesystem(&hugetlbfs_fs_type);
+ out_free:
 	kmem_cache_destroy(hugetlbfs_inode_cachep);
- out2:
+ out:
 	return error;
 }
 fs_initcall(init_hugetlbfs_fs)

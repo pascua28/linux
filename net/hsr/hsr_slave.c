@@ -27,6 +27,8 @@ static rx_handler_result_t hsr_handle_frame(struct sk_buff **pskb)
 
 	rcu_read_lock(); /* hsr->node_db, hsr->ports */
 	port = hsr_port_get_rcu(skb->dev);
+	if (!port)
+		goto finish_pass;
 
 	if (hsr_addr_is_self(port->hsr, eth_hdr(skb)->h_source)) {
 		/* Directly kill frames sent by ourselves */
@@ -193,4 +195,5 @@ void hsr_del_port(struct hsr_port *port)
 
 	if (port != master)
 		dev_put(port->dev);
+	kfree(port);
 }

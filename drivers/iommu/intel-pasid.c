@@ -169,23 +169,6 @@ attach_out:
 	return 0;
 }
 
-/* Get PRESENT bit of a PASID directory entry. */
-static inline bool
-pasid_pde_is_present(struct pasid_dir_entry *pde)
-{
-	return READ_ONCE(pde->val) & PASID_PTE_PRESENT;
-}
-
-/* Get PASID table from a PASID directory entry. */
-static inline struct pasid_entry *
-get_pasid_table_from_pde(struct pasid_dir_entry *pde)
-{
-	if (!pasid_pde_is_present(pde))
-		return NULL;
-
-	return phys_to_virt(READ_ONCE(pde->val) & PDE_PFN_MASK);
-}
-
 void intel_pasid_free_table(struct device *dev)
 {
 	struct device_domain_info *info;
@@ -516,8 +499,16 @@ int intel_pasid_setup_first_level(struct intel_iommu *iommu,
 	}
 
 #ifdef CONFIG_X86
-	if (cpu_feature_enabled(X86_FEATURE_LA57))
-		pasid_set_flpm(pte, 1);
+	/* Both CPU and IOMMU paging mode need to match */
+	if (cpu_feature_enabled(X86_FEATURE_LA57)) {
+		if (cap_5lp_support(iommu->cap)) {
+			pasid_set_flpm(pte, 1);
+		} else {
+			pr_err("VT-d has no 5-level paging support for CPU\n");
+			pasid_clear_entry(pte);
+			return -EINVAL;
+		}
+	}
 #endif /* CONFIG_X86 */
 
 	pasid_set_domain_id(pte, did);

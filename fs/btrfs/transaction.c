@@ -10,6 +10,7 @@
 #include <linux/pagemap.h>
 #include <linux/blkdev.h>
 #include <linux/uuid.h>
+#include "misc.h"
 #include "ctree.h"
 #include "disk-io.h"
 #include "transaction.h"
@@ -19,6 +20,7 @@
 #include "volumes.h"
 #include "dev-replace.h"
 #include "qgroup.h"
+#include "block-group.h"
 
 #define BTRFS_ROOT_TRANS_TAG 0
 
@@ -28,15 +30,18 @@ static const unsigned int btrfs_blocked_trans_types[TRANS_STATE_MAX] = {
 	[TRANS_STATE_COMMIT_START]	= (__TRANS_START | __TRANS_ATTACH),
 	[TRANS_STATE_COMMIT_DOING]	= (__TRANS_START |
 					   __TRANS_ATTACH |
-					   __TRANS_JOIN),
+					   __TRANS_JOIN |
+					   __TRANS_JOIN_NOSTART),
 	[TRANS_STATE_UNBLOCKED]		= (__TRANS_START |
 					   __TRANS_ATTACH |
 					   __TRANS_JOIN |
-					   __TRANS_JOIN_NOLOCK),
+					   __TRANS_JOIN_NOLOCK |
+					   __TRANS_JOIN_NOSTART),
 	[TRANS_STATE_COMPLETED]		= (__TRANS_START |
 					   __TRANS_ATTACH |
 					   __TRANS_JOIN |
-					   __TRANS_JOIN_NOLOCK),
+					   __TRANS_JOIN_NOLOCK |
+					   __TRANS_JOIN_NOSTART),
 };
 
 void btrfs_put_transaction(struct btrfs_transaction *transaction)
@@ -46,6 +51,8 @@ void btrfs_put_transaction(struct btrfs_transaction *transaction)
 		BUG_ON(!list_empty(&transaction->list));
 		WARN_ON(!RB_EMPTY_ROOT(
 				&transaction->delayed_refs.href_root.rb_root));
+		WARN_ON(!RB_EMPTY_ROOT(
+				&transaction->delayed_refs.dirty_extent_root));
 		if (transaction->delayed_refs.pending_csums)
 			btrfs_err(transaction->fs_info,
 				  "pending csums is %llu",
@@ -72,13 +79,14 @@ void btrfs_put_transaction(struct btrfs_transaction *transaction)
 	}
 }
 
-static noinline void switch_commit_roots(struct btrfs_transaction *trans)
+static noinline void switch_commit_roots(struct btrfs_trans_handle *trans)
 {
+	struct btrfs_transaction *cur_trans = trans->transaction;
 	struct btrfs_fs_info *fs_info = trans->fs_info;
 	struct btrfs_root *root, *tmp;
 
 	down_write(&fs_info->commit_root_sem);
-	list_for_each_entry_safe(root, tmp, &trans->switch_commits,
+	list_for_each_entry_safe(root, tmp, &cur_trans->switch_commits,
 				 dirty_list) {
 		list_del_init(&root->dirty_list);
 		free_extent_buffer(root->commit_root);
@@ -90,16 +98,17 @@ static noinline void switch_commit_roots(struct btrfs_transaction *trans)
 	}
 
 	/* We can free old roots now. */
-	spin_lock(&trans->dropped_roots_lock);
-	while (!list_empty(&trans->dropped_roots)) {
-		root = list_first_entry(&trans->dropped_roots,
+	spin_lock(&cur_trans->dropped_roots_lock);
+	while (!list_empty(&cur_trans->dropped_roots)) {
+		root = list_first_entry(&cur_trans->dropped_roots,
 					struct btrfs_root, root_list);
 		list_del_init(&root->root_list);
-		spin_unlock(&trans->dropped_roots_lock);
+		spin_unlock(&cur_trans->dropped_roots_lock);
+		btrfs_free_log(trans, root);
 		btrfs_drop_and_free_fs_root(fs_info, root);
-		spin_lock(&trans->dropped_roots_lock);
+		spin_lock(&cur_trans->dropped_roots_lock);
 	}
-	spin_unlock(&trans->dropped_roots_lock);
+	spin_unlock(&cur_trans->dropped_roots_lock);
 	up_write(&fs_info->commit_root_sem);
 }
 
@@ -126,6 +135,24 @@ static inline void extwriter_counter_init(struct btrfs_transaction *trans,
 static inline int extwriter_counter_read(struct btrfs_transaction *trans)
 {
 	return atomic_read(&trans->num_extwriters);
+}
+
+/*
+ * To be called after all the new block groups attached to the transaction
+ * handle have been created (btrfs_create_pending_block_groups()).
+ */
+void btrfs_trans_release_chunk_metadata(struct btrfs_trans_handle *trans)
+{
+	struct btrfs_fs_info *fs_info = trans->fs_info;
+
+	if (!trans->chunk_bytes_reserved)
+		return;
+
+	WARN_ON_ONCE(!list_empty(&trans->new_bgs));
+
+	btrfs_block_rsv_release(fs_info, &fs_info->chunk_block_rsv,
+				trans->chunk_bytes_reserved);
+	trans->chunk_bytes_reserved = 0;
 }
 
 /*
@@ -463,7 +490,7 @@ start_transaction(struct btrfs_root *root, unsigned int num_items,
 		 * worth of delayed refs updates in this trans handle, and
 		 * refill that amount for whatever is missing in the reserve.
 		 */
-		num_bytes = btrfs_calc_trans_metadata_size(fs_info, num_items);
+		num_bytes = btrfs_calc_insert_metadata_size(fs_info, num_items);
 		if (delayed_refs_rsv->full == 0) {
 			delayed_refs_bytes = num_bytes;
 			num_bytes <<= 1;
@@ -525,7 +552,8 @@ again:
 		ret = join_transaction(fs_info, type);
 		if (ret == -EBUSY) {
 			wait_current_trans(fs_info);
-			if (unlikely(type == TRANS_ATTACH))
+			if (unlikely(type == TRANS_ATTACH ||
+				     type == TRANS_JOIN_NOSTART))
 				ret = -ENOENT;
 		}
 	} while (ret == -EBUSY);
@@ -613,7 +641,7 @@ struct btrfs_trans_handle *btrfs_start_transaction_fallback_global_rsv(
 	if (IS_ERR(trans))
 		return trans;
 
-	num_bytes = btrfs_calc_trans_metadata_size(fs_info, num_items);
+	num_bytes = btrfs_calc_insert_metadata_size(fs_info, num_items);
 	ret = btrfs_cond_migrate_bytes(fs_info, &fs_info->trans_block_rsv,
 				       num_bytes, min_factor);
 	if (ret) {
@@ -638,6 +666,16 @@ struct btrfs_trans_handle *btrfs_join_transaction(struct btrfs_root *root)
 struct btrfs_trans_handle *btrfs_join_transaction_nolock(struct btrfs_root *root)
 {
 	return start_transaction(root, 0, TRANS_JOIN_NOLOCK,
+				 BTRFS_RESERVE_NO_FLUSH, true);
+}
+
+/*
+ * Similar to regular join but it never starts a transaction when none is
+ * running or after waiting for the current one to finish.
+ */
+struct btrfs_trans_handle *btrfs_join_transaction_nostart(struct btrfs_root *root)
+{
+	return start_transaction(root, 0, TRANS_JOIN_NOSTART,
 				 BTRFS_RESERVE_NO_FLUSH, true);
 }
 
@@ -1325,7 +1363,7 @@ static int qgroup_account_snapshot(struct btrfs_trans_handle *trans,
 	ret = commit_cowonly_roots(trans);
 	if (ret)
 		goto out;
-	switch_commit_roots(trans->transaction);
+	switch_commit_roots(trans);
 	ret = btrfs_write_and_wait_transaction(trans);
 	if (ret)
 		btrfs_handle_fs_error(fs_info, ret,
@@ -1915,6 +1953,14 @@ int btrfs_commit_transaction(struct btrfs_trans_handle *trans)
 	struct btrfs_transaction *prev_trans = NULL;
 	int ret;
 
+	/*
+	 * Some places just start a transaction to commit it.  We need to make
+	 * sure that if this commit fails that the abort code actually marks the
+	 * transaction as failed, so set trans->dirty to make the abort code do
+	 * the right thing.
+	 */
+	trans->dirty = true;
+
 	/* Stop the commit early if ->aborted is set */
 	if (unlikely(READ_ONCE(cur_trans->aborted))) {
 		ret = cur_trans->aborted;
@@ -2019,6 +2065,16 @@ int btrfs_commit_transaction(struct btrfs_trans_handle *trans)
 		}
 	} else {
 		spin_unlock(&fs_info->trans_lock);
+		/*
+		 * The previous transaction was aborted and was already removed
+		 * from the list of transactions at fs_info->trans_list. So we
+		 * abort to prevent writing a new superblock that reflects a
+		 * corrupt state (pointing to trees with unwritten nodes/leafs).
+		 */
+		if (test_bit(BTRFS_FS_STATE_TRANS_ABORTED, &fs_info->fs_state)) {
+			ret = -EROFS;
+			goto cleanup_transaction;
+		}
 	}
 
 	extwriter_counter_dec(cur_trans, trans->type);
@@ -2193,7 +2249,7 @@ int btrfs_commit_transaction(struct btrfs_trans_handle *trans)
 	list_add_tail(&fs_info->chunk_root->dirty_list,
 		      &cur_trans->switch_commits);
 
-	switch_commit_roots(cur_trans);
+	switch_commit_roots(trans);
 
 	ASSERT(list_empty(&cur_trans->dirty_bgs));
 	ASSERT(list_empty(&cur_trans->io_bgs));

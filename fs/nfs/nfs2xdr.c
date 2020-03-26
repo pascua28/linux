@@ -151,7 +151,7 @@ static int decode_stat(struct xdr_stream *xdr, enum nfs_stat *status)
 	return 0;
 out_status:
 	*status = be32_to_cpup(p);
-	trace_nfs_xdr_status((int)*status);
+	trace_nfs_xdr_status(xdr, (int)*status);
 	return 0;
 }
 
@@ -370,7 +370,7 @@ static void encode_sattr(struct xdr_stream *xdr, const struct iattr *attr,
 	} else
 		p = xdr_time_not_set(p);
 	if (attr->ia_valid & ATTR_MTIME_SET) {
-		ts = timespec64_to_timespec(attr->ia_atime);
+		ts = timespec64_to_timespec(attr->ia_mtime);
 		xdr_encode_time(p, &ts);
 	} else if (attr->ia_valid & ATTR_MTIME) {
 		ts = timespec64_to_timespec(attr->ia_mtime);

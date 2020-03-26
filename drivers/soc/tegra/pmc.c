@@ -232,6 +232,11 @@ struct tegra_pmc_soc {
 	const char * const *reset_levels;
 	unsigned int num_reset_levels;
 
+	/*
+	 * These describe events that can wake the system from sleep (i.e.
+	 * LP0 or SC7). Wakeup from other sleep states (such as LP1 or LP2)
+	 * are dealt with in the LIC.
+	 */
 	const struct tegra_wake_event *wake_events;
 	unsigned int num_wake_events;
 };
@@ -700,6 +705,7 @@ int tegra_powergate_power_on(unsigned int id)
 
 	return tegra_powergate_set(pmc, id, true);
 }
+EXPORT_SYMBOL(tegra_powergate_power_on);
 
 /**
  * tegra_powergate_power_off() - power off partition
@@ -1854,6 +1860,9 @@ static int tegra_pmc_irq_alloc(struct irq_domain *domain, unsigned int virq,
 	unsigned int i;
 	int err = 0;
 
+	if (WARN_ON(num_irqs > 1))
+		return -EINVAL;
+
 	for (i = 0; i < soc->num_wake_events; i++) {
 		const struct tegra_wake_event *event = &soc->wake_events[i];
 
@@ -1890,13 +1899,44 @@ static int tegra_pmc_irq_alloc(struct irq_domain *domain, unsigned int virq,
 							    event->id,
 							    &pmc->irq, pmc);
 
+			/*
+			 * GPIOs don't have an equivalent interrupt in the
+			 * parent controller (GIC). However some code, such
+			 * as the one in irq_get_irqchip_state(), require a
+			 * valid IRQ chip to be set. Make sure that's the
+			 * case by passing NULL here, which will install a
+			 * dummy IRQ chip for the interrupt in the parent
+			 * domain.
+			 */
+			if (domain->parent)
+				irq_domain_set_hwirq_and_chip(domain->parent,
+							      virq, 0, NULL,
+							      NULL);
+
 			break;
 		}
 	}
 
-	if (i == soc->num_wake_events)
+	/*
+	 * For interrupts that don't have associated wake events, assign a
+	 * dummy hardware IRQ number. This is used in the ->irq_set_type()
+	 * and ->irq_set_wake() callbacks to return early for these IRQs.
+	 */
+	if (i == soc->num_wake_events) {
 		err = irq_domain_set_hwirq_and_chip(domain, virq, ULONG_MAX,
 						    &pmc->irq, pmc);
+
+		/*
+		 * Interrupts without a wake event don't have a corresponding
+		 * interrupt in the parent controller (GIC). Pass NULL for the
+		 * chip here, which causes a dummy IRQ chip to be installed
+		 * for the interrupt in the parent domain, to make this
+		 * explicit.
+		 */
+		if (domain->parent)
+			irq_domain_set_hwirq_and_chip(domain->parent, virq, 0,
+						      NULL, NULL);
+	}
 
 	return err;
 }
@@ -1911,6 +1951,10 @@ static int tegra_pmc_irq_set_wake(struct irq_data *data, unsigned int on)
 	struct tegra_pmc *pmc = irq_data_get_irq_chip_data(data);
 	unsigned int offset, bit;
 	u32 value;
+
+	/* nothing to do if there's no associated wake event */
+	if (WARN_ON(data->hwirq == ULONG_MAX))
+		return 0;
 
 	offset = data->hwirq / 32;
 	bit = data->hwirq % 32;
@@ -1939,6 +1983,7 @@ static int tegra_pmc_irq_set_type(struct irq_data *data, unsigned int type)
 	struct tegra_pmc *pmc = irq_data_get_irq_chip_data(data);
 	u32 value;
 
+	/* nothing to do if there's no associated wake event */
 	if (data->hwirq == ULONG_MAX)
 		return 0;
 

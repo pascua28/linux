@@ -249,6 +249,7 @@
 #define DP_DSC_PEAK_THROUGHPUT              0x06B
 # define DP_DSC_THROUGHPUT_MODE_0_MASK      (0xf << 0)
 # define DP_DSC_THROUGHPUT_MODE_0_SHIFT     0
+# define DP_DSC_THROUGHPUT_MODE_0_UPSUPPORTED 0
 # define DP_DSC_THROUGHPUT_MODE_0_340       (1 << 0)
 # define DP_DSC_THROUGHPUT_MODE_0_400       (2 << 0)
 # define DP_DSC_THROUGHPUT_MODE_0_450       (3 << 0)
@@ -263,8 +264,10 @@
 # define DP_DSC_THROUGHPUT_MODE_0_900       (12 << 0)
 # define DP_DSC_THROUGHPUT_MODE_0_950       (13 << 0)
 # define DP_DSC_THROUGHPUT_MODE_0_1000      (14 << 0)
+# define DP_DSC_THROUGHPUT_MODE_0_170       (15 << 4)
 # define DP_DSC_THROUGHPUT_MODE_1_MASK      (0xf << 4)
 # define DP_DSC_THROUGHPUT_MODE_1_SHIFT     4
+# define DP_DSC_THROUGHPUT_MODE_1_UPSUPPORTED 0
 # define DP_DSC_THROUGHPUT_MODE_1_340       (1 << 4)
 # define DP_DSC_THROUGHPUT_MODE_1_400       (2 << 4)
 # define DP_DSC_THROUGHPUT_MODE_1_450       (3 << 4)
@@ -279,6 +282,7 @@
 # define DP_DSC_THROUGHPUT_MODE_1_900       (12 << 4)
 # define DP_DSC_THROUGHPUT_MODE_1_950       (13 << 4)
 # define DP_DSC_THROUGHPUT_MODE_1_1000      (14 << 4)
+# define DP_DSC_THROUGHPUT_MODE_1_170       (15 << 4)
 
 #define DP_DSC_MAX_SLICE_WIDTH              0x06C
 #define DP_DSC_MIN_SLICE_WIDTH_VALUE        2560
@@ -351,6 +355,11 @@
 # define DP_FEC_UNCORR_BLK_ERROR_COUNT_CAP  (1 << 1)
 # define DP_FEC_CORR_BLK_ERROR_COUNT_CAP    (1 << 2)
 # define DP_FEC_BIT_ERROR_COUNT_CAP	    (1 << 3)
+
+/* DP Extended DSC Capabilities */
+#define DP_DSC_BRANCH_OVERALL_THROUGHPUT_0  0x0a0   /* DP 1.4a SCR */
+#define DP_DSC_BRANCH_OVERALL_THROUGHPUT_1  0x0a1
+#define DP_DSC_BRANCH_MAX_LINE_WIDTH        0x0a2
 
 /* link configuration */
 #define	DP_LINK_BW_SET		            0x100
@@ -640,6 +649,14 @@
 # define DP_TEST_COUNT_MASK		    0xf
 
 #define DP_TEST_PHY_PATTERN                 0x248
+# define DP_TEST_PHY_PATTERN_NONE			0x0
+# define DP_TEST_PHY_PATTERN_D10_2_NO_SCRAMBLING	0x1
+# define DP_TEST_PHY_PATTERN_SYMBOL_ERR_MEASUREMENT_CNT 0x2
+# define DP_TEST_PHY_PATTERN_PRBS7			0x3
+# define DP_TEST_PHY_PATTERN_80_BIT_CUSTOM_PATTERN	0x4
+# define DP_TEST_PHY_PATTERN_CP2520_PATTERN_1		0x5
+# define DP_TEST_PHY_PATTERN_CP2520_PATTERN_2		0x6
+# define DP_TEST_PHY_PATTERN_CP2520_PATTERN_3		0x7
 #define DP_TEST_80BIT_CUSTOM_PATTERN_7_0    0x250
 #define	DP_TEST_80BIT_CUSTOM_PATTERN_15_8   0x251
 #define	DP_TEST_80BIT_CUSTOM_PATTERN_23_16  0x252
@@ -1083,17 +1100,30 @@ struct dp_sdp_header {
 #define EDP_SDP_HEADER_VALID_PAYLOAD_BYTES	0x1F
 #define DP_SDP_PPS_HEADER_PAYLOAD_BYTES_MINUS_1 0x7F
 
-struct edp_vsc_psr {
+/**
+ * struct dp_sdp - DP secondary data packet
+ * @sdp_header: DP secondary data packet header
+ * @db: DP secondaray data packet data blocks
+ * VSC SDP Payload for PSR
+ * db[0]: Stereo Interface
+ * db[1]: 0 - PSR State; 1 - Update RFB; 2 - CRC Valid
+ * db[2]: CRC value bits 7:0 of the R or Cr component
+ * db[3]: CRC value bits 15:8 of the R or Cr component
+ * db[4]: CRC value bits 7:0 of the G or Y component
+ * db[5]: CRC value bits 15:8 of the G or Y component
+ * db[6]: CRC value bits 7:0 of the B or Cb component
+ * db[7]: CRC value bits 15:8 of the B or Cb component
+ * db[8] - db[31]: Reserved
+ * VSC SDP Payload for Pixel Encoding/Colorimetry Format
+ * db[0] - db[15]: Reserved
+ * db[16]: Pixel Encoding and Colorimetry Formats
+ * db[17]: Dynamic Range and Component Bit Depth
+ * db[18]: Content Type
+ * db[19] - db[31]: Reserved
+ */
+struct dp_sdp {
 	struct dp_sdp_header sdp_header;
-	u8 DB0; /* Stereo Interface */
-	u8 DB1; /* 0 - PSR State; 1 - Update RFB; 2 - CRC Valid */
-	u8 DB2; /* CRC value bits 7:0 of the R or Cr component */
-	u8 DB3; /* CRC value bits 15:8 of the R or Cr component */
-	u8 DB4; /* CRC value bits 7:0 of the G or Y component */
-	u8 DB5; /* CRC value bits 15:8 of the G or Y component */
-	u8 DB6; /* CRC value bits 7:0 of the B or Cb component */
-	u8 DB7; /* CRC value bits 15:8 of the B or Cb component */
-	u8 DB8_31[24]; /* Reserved */
+	u8 db[32];
 } __packed;
 
 #define EDP_VSC_PSR_STATE_ACTIVE	(1<<0)
@@ -1287,6 +1317,10 @@ struct drm_dp_aux {
 	 * @cec: struct containing fields used for CEC-Tunneling-over-AUX.
 	 */
 	struct drm_dp_aux_cec cec;
+	/**
+	 * @is_remote: Is this AUX CH actually using sideband messaging.
+	 */
+	bool is_remote;
 };
 
 ssize_t drm_dp_dpcd_read(struct drm_dp_aux *aux, unsigned int offset,
@@ -1327,6 +1361,8 @@ static inline ssize_t drm_dp_dpcd_writeb(struct drm_dp_aux *aux,
 int drm_dp_dpcd_read_link_status(struct drm_dp_aux *aux,
 				 u8 status[DP_LINK_STATUS_SIZE]);
 
+bool drm_dp_send_real_edid_checksum(struct drm_dp_aux *aux,
+		u8 real_edid_checksum);
 /*
  * DisplayPort link
  */
@@ -1401,6 +1437,13 @@ enum drm_dp_quirk {
 	 * driver still need to implement proper handling for such device.
 	 */
 	DP_DPCD_QUIRK_NO_PSR,
+	/**
+	 * @DP_DPCD_QUIRK_NO_SINK_COUNT:
+	 *
+	 * The device does not set SINK_COUNT to a non-zero value.
+	 * The driver should ignore SINK_COUNT during detection.
+	 */
+	DP_DPCD_QUIRK_NO_SINK_COUNT,
 };
 
 /**

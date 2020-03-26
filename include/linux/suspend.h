@@ -190,8 +190,9 @@ struct platform_suspend_ops {
 struct platform_s2idle_ops {
 	int (*begin)(void);
 	int (*prepare)(void);
-	void (*wake)(void);
-	void (*sync)(void);
+	int (*prepare_late)(void);
+	bool (*wake)(void);
+	void (*restore_early)(void);
 	void (*restore)(void);
 	void (*end)(void);
 };
@@ -304,7 +305,7 @@ static inline bool idle_should_enter_s2idle(void)
 	return unlikely(s2idle_state == S2IDLE_STATE_ENTER);
 }
 
-extern bool pm_suspend_via_s2idle(void);
+extern bool pm_suspend_default_s2idle(void);
 extern void __init pm_states_init(void);
 extern void s2idle_set_ops(const struct platform_s2idle_ops *ops);
 extern void s2idle_wake(void);
@@ -336,7 +337,8 @@ static inline void pm_set_suspend_via_firmware(void) {}
 static inline void pm_set_resume_via_firmware(void) {}
 static inline bool pm_suspend_via_firmware(void) { return false; }
 static inline bool pm_resume_via_firmware(void) { return false; }
-static inline bool pm_suspend_via_s2idle(void) { return false; }
+static inline bool pm_suspend_no_platform(void) { return false; }
+static inline bool pm_suspend_default_s2idle(void) { return false; }
 
 static inline void suspend_set_ops(const struct platform_suspend_ops *ops) {}
 static inline int pm_suspend(suspend_state_t state) { return -ENOSYS; }
@@ -448,6 +450,7 @@ extern bool system_entering_hibernation(void);
 extern bool hibernation_available(void);
 asmlinkage int swsusp_save(void);
 extern struct pbe *restore_pblist;
+int pfn_is_nosave(unsigned long pfn);
 #else /* CONFIG_HIBERNATION */
 static inline void register_nosave_region(unsigned long b, unsigned long e) {}
 static inline void register_nosave_region_late(unsigned long b, unsigned long e) {}
@@ -500,6 +503,7 @@ extern bool pm_get_wakeup_count(unsigned int *count, bool block);
 extern bool pm_save_wakeup_count(unsigned int count);
 extern void pm_wakep_autosleep_enabled(bool set);
 extern void pm_print_active_wakeup_sources(void);
+extern void pm_get_active_wakeup_sources(char *pending_sources, size_t max);
 
 extern void lock_system_sleep(void);
 extern void unlock_system_sleep(void);

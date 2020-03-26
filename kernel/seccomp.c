@@ -609,7 +609,7 @@ static void seccomp_send_sigsys(int syscall, int reason)
 {
 	struct kernel_siginfo info;
 	seccomp_init_siginfo(&info, syscall, reason);
-	force_sig_info(SIGSYS, &info, current);
+	force_sig_info(&info);
 }
 #endif	/* CONFIG_SECCOMP_FILTER */
 
@@ -1014,6 +1014,13 @@ static long seccomp_notify_recv(struct seccomp_filter *filter,
 	struct seccomp_knotif *knotif = NULL, *cur;
 	struct seccomp_notif unotif;
 	ssize_t ret;
+
+	/* Verify that we're not given garbage to keep struct extensible. */
+	ret = check_zeroed_user(buf, sizeof(unotif));
+	if (ret < 0)
+		return ret;
+	if (!ret)
+		return -EINVAL;
 
 	memset(&unotif, 0, sizeof(unotif));
 

@@ -24,7 +24,9 @@
 #include <linux/errno.h>
 #include <linux/export.h>
 #include <linux/kernel.h>
-#include <drm/drmP.h>
+
+#include <drm/drm_mode.h>
+#include <drm/drm_print.h>
 #include <drm/drm_rect.h>
 
 /**
@@ -52,7 +54,12 @@ EXPORT_SYMBOL(drm_rect_intersect);
 
 static u32 clip_scaled(u32 src, u32 dst, u32 clip)
 {
-	u64 tmp = mul_u32_u32(src, dst - clip);
+	u64 tmp;
+
+	if (dst == 0)
+		return 0;
+
+	tmp = mul_u32_u32(src, dst - clip);
 
 	/*
 	 * Round toward 1.0 when clipping so that we don't accidentally

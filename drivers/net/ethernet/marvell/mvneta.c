@@ -388,6 +388,8 @@ struct mvneta_pcpu_stats {
 	struct	u64_stats_sync syncp;
 	u64	rx_packets;
 	u64	rx_bytes;
+	u64	rx_dropped;
+	u64	rx_errors;
 	u64	tx_packets;
 	u64	tx_bytes;
 };
@@ -437,6 +439,7 @@ struct mvneta_port {
 	struct device_node *dn;
 	unsigned int tx_csum_limit;
 	struct phylink *phylink;
+	struct phylink_config phylink_config;
 	struct phy *comphy;
 
 	struct mvneta_bm *bm_priv;
@@ -705,6 +708,8 @@ mvneta_get_stats64(struct net_device *dev,
 		struct mvneta_pcpu_stats *cpu_stats;
 		u64 rx_packets;
 		u64 rx_bytes;
+		u64 rx_dropped;
+		u64 rx_errors;
 		u64 tx_packets;
 		u64 tx_bytes;
 
@@ -713,18 +718,19 @@ mvneta_get_stats64(struct net_device *dev,
 			start = u64_stats_fetch_begin_irq(&cpu_stats->syncp);
 			rx_packets = cpu_stats->rx_packets;
 			rx_bytes   = cpu_stats->rx_bytes;
+			rx_dropped = cpu_stats->rx_dropped;
+			rx_errors  = cpu_stats->rx_errors;
 			tx_packets = cpu_stats->tx_packets;
 			tx_bytes   = cpu_stats->tx_bytes;
 		} while (u64_stats_fetch_retry_irq(&cpu_stats->syncp, start));
 
 		stats->rx_packets += rx_packets;
 		stats->rx_bytes   += rx_bytes;
+		stats->rx_dropped += rx_dropped;
+		stats->rx_errors  += rx_errors;
 		stats->tx_packets += tx_packets;
 		stats->tx_bytes   += tx_bytes;
 	}
-
-	stats->rx_errors	= dev->stats.rx_errors;
-	stats->rx_dropped	= dev->stats.rx_dropped;
 
 	stats->tx_dropped	= dev->stats.tx_dropped;
 }
@@ -1118,7 +1124,7 @@ static void mvneta_bm_update_mtu(struct mvneta_port *pp, int mtu)
 			SKB_DATA_ALIGN(MVNETA_RX_BUF_SIZE(bm_pool->pkt_size));
 
 	/* Fill entire long pool */
-	num = hwbm_pool_add(hwbm_pool, hwbm_pool->size, GFP_ATOMIC);
+	num = hwbm_pool_add(hwbm_pool, hwbm_pool->size);
 	if (num != hwbm_pool->size) {
 		WARN(1, "pool %d: %d of %d allocated\n",
 		     bm_pool->id, num, hwbm_pool->size);
@@ -1702,7 +1708,13 @@ static u32 mvneta_txq_desc_csum(int l3_offs, int l3_proto,
 static void mvneta_rx_error(struct mvneta_port *pp,
 			    struct mvneta_rx_desc *rx_desc)
 {
+	struct mvneta_pcpu_stats *stats = this_cpu_ptr(pp->stats);
 	u32 status = rx_desc->status;
+
+	/* update per-cpu counter */
+	u64_stats_update_begin(&stats->syncp);
+	stats->rx_errors++;
+	u64_stats_update_end(&stats->syncp);
 
 	switch (status & MVNETA_RXD_ERR_CODE_MASK) {
 	case MVNETA_RXD_ERR_CRC:
@@ -1964,7 +1976,6 @@ static int mvneta_rx_swbm(struct napi_struct *napi,
 			/* Check errors only for FIRST descriptor */
 			if (rx_status & MVNETA_RXD_ERR_SUMMARY) {
 				mvneta_rx_error(pp, rx_desc);
-				dev->stats.rx_errors++;
 				/* leave the descriptor untouched */
 				continue;
 			}
@@ -1975,11 +1986,17 @@ static int mvneta_rx_swbm(struct napi_struct *napi,
 			skb_size = max(rx_copybreak, rx_header_size);
 			rxq->skb = netdev_alloc_skb_ip_align(dev, skb_size);
 			if (unlikely(!rxq->skb)) {
+				struct mvneta_pcpu_stats *stats = this_cpu_ptr(pp->stats);
+
 				netdev_err(dev,
 					   "Can't allocate skb on queue %d\n",
 					   rxq->id);
-				dev->stats.rx_dropped++;
+
 				rxq->skb_alloc_err++;
+
+				u64_stats_update_begin(&stats->syncp);
+				stats->rx_dropped++;
+				u64_stats_update_end(&stats->syncp);
 				continue;
 			}
 			copy_size = min(skb_size, rx_bytes);
@@ -2136,7 +2153,6 @@ err_drop_frame_ret_pool:
 			mvneta_bm_pool_put_bp(pp->bm_priv, bm_pool,
 					      rx_desc->buf_phys_addr);
 err_drop_frame:
-			dev->stats.rx_errors++;
 			mvneta_rx_error(pp, rx_desc);
 			/* leave the descriptor untouched */
 			continue;
@@ -2349,10 +2365,10 @@ static int mvneta_tx_frag_process(struct mvneta_port *pp, struct sk_buff *skb,
 
 	for (i = 0; i < nr_frags; i++) {
 		skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
-		void *addr = page_address(frag->page.p) + frag->page_offset;
+		void *addr = skb_frag_address(frag);
 
 		tx_desc = mvneta_txq_next_desc_get(txq);
-		tx_desc->data_size = frag->size;
+		tx_desc->data_size = skb_frag_size(frag);
 
 		tx_desc->buf_phys_addr =
 			dma_map_single(pp->dev->dev.parent, addr,
@@ -3356,9 +3372,11 @@ static int mvneta_set_mac_addr(struct net_device *dev, void *addr)
 	return 0;
 }
 
-static void mvneta_validate(struct net_device *ndev, unsigned long *supported,
+static void mvneta_validate(struct phylink_config *config,
+			    unsigned long *supported,
 			    struct phylink_link_state *state)
 {
+	struct net_device *ndev = to_net_dev(config->dev);
 	struct mvneta_port *pp = netdev_priv(ndev);
 	__ETHTOOL_DECLARE_LINK_MODE_MASK(mask) = { 0, };
 
@@ -3408,9 +3426,10 @@ static void mvneta_validate(struct net_device *ndev, unsigned long *supported,
 	phylink_helper_basex_speed(state);
 }
 
-static int mvneta_mac_link_state(struct net_device *ndev,
+static int mvneta_mac_link_state(struct phylink_config *config,
 				 struct phylink_link_state *state)
 {
+	struct net_device *ndev = to_net_dev(config->dev);
 	struct mvneta_port *pp = netdev_priv(ndev);
 	u32 gmac_stat;
 
@@ -3438,8 +3457,9 @@ static int mvneta_mac_link_state(struct net_device *ndev,
 	return 1;
 }
 
-static void mvneta_mac_an_restart(struct net_device *ndev)
+static void mvneta_mac_an_restart(struct phylink_config *config)
 {
+	struct net_device *ndev = to_net_dev(config->dev);
 	struct mvneta_port *pp = netdev_priv(ndev);
 	u32 gmac_an = mvreg_read(pp, MVNETA_GMAC_AUTONEG_CONFIG);
 
@@ -3449,9 +3469,10 @@ static void mvneta_mac_an_restart(struct net_device *ndev)
 		    gmac_an & ~MVNETA_GMAC_INBAND_RESTART_AN);
 }
 
-static void mvneta_mac_config(struct net_device *ndev, unsigned int mode,
-	const struct phylink_link_state *state)
+static void mvneta_mac_config(struct phylink_config *config, unsigned int mode,
+			      const struct phylink_link_state *state)
 {
+	struct net_device *ndev = to_net_dev(config->dev);
 	struct mvneta_port *pp = netdev_priv(ndev);
 	u32 new_ctrl0, gmac_ctrl0 = mvreg_read(pp, MVNETA_GMAC_CTRL_0);
 	u32 new_ctrl2, gmac_ctrl2 = mvreg_read(pp, MVNETA_GMAC_CTRL_2);
@@ -3581,9 +3602,10 @@ static void mvneta_set_eee(struct mvneta_port *pp, bool enable)
 	mvreg_write(pp, MVNETA_LPI_CTRL_1, lpi_ctl1);
 }
 
-static void mvneta_mac_link_down(struct net_device *ndev, unsigned int mode,
-				 phy_interface_t interface)
+static void mvneta_mac_link_down(struct phylink_config *config,
+				 unsigned int mode, phy_interface_t interface)
 {
+	struct net_device *ndev = to_net_dev(config->dev);
 	struct mvneta_port *pp = netdev_priv(ndev);
 	u32 val;
 
@@ -3600,10 +3622,11 @@ static void mvneta_mac_link_down(struct net_device *ndev, unsigned int mode,
 	mvneta_set_eee(pp, false);
 }
 
-static void mvneta_mac_link_up(struct net_device *ndev, unsigned int mode,
+static void mvneta_mac_link_up(struct phylink_config *config, unsigned int mode,
 			       phy_interface_t interface,
 			       struct phy_device *phy)
 {
+	struct net_device *ndev = to_net_dev(config->dev);
 	struct mvneta_port *pp = netdev_priv(ndev);
 	u32 val;
 
@@ -4461,7 +4484,6 @@ static int mvneta_port_power_up(struct mvneta_port *pp, int phy_mode)
 /* Device initialization routine */
 static int mvneta_probe(struct platform_device *pdev)
 {
-	struct resource *res;
 	struct device_node *dn = pdev->dev.of_node;
 	struct device_node *bm_node;
 	struct mvneta_port *pp;
@@ -4500,8 +4522,14 @@ static int mvneta_probe(struct platform_device *pdev)
 		comphy = NULL;
 	}
 
-	phylink = phylink_create(dev, pdev->dev.fwnode, phy_mode,
-				 &mvneta_phylink_ops);
+	pp = netdev_priv(dev);
+	spin_lock_init(&pp->lock);
+
+	pp->phylink_config.dev = &dev->dev;
+	pp->phylink_config.type = PHYLINK_NETDEV;
+
+	phylink = phylink_create(&pp->phylink_config, pdev->dev.fwnode,
+				 phy_mode, &mvneta_phylink_ops);
 	if (IS_ERR(phylink)) {
 		err = PTR_ERR(phylink);
 		goto err_free_irq;
@@ -4513,8 +4541,6 @@ static int mvneta_probe(struct platform_device *pdev)
 
 	dev->ethtool_ops = &mvneta_eth_tool_ops;
 
-	pp = netdev_priv(dev);
-	spin_lock_init(&pp->lock);
 	pp->phylink = phylink;
 	pp->comphy = comphy;
 	pp->phy_interface = phy_mode;
@@ -4541,8 +4567,7 @@ static int mvneta_probe(struct platform_device *pdev)
 	if (!IS_ERR(pp->clk_bus))
 		clk_prepare_enable(pp->clk_bus);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	pp->base = devm_ioremap_resource(&pdev->dev, res);
+	pp->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(pp->base)) {
 		err = PTR_ERR(pp->base);
 		goto err_clk;

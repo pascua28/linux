@@ -89,7 +89,7 @@ to_imx_tpm_pwm_chip(struct pwm_chip *chip)
 static int pwm_imx_tpm_round_state(struct pwm_chip *chip,
 				   struct imx_tpm_pwm_param *p,
 				   struct pwm_state *real_state,
-				   struct pwm_state *state)
+				   const struct pwm_state *state)
 {
 	struct imx_tpm_pwm_chip *tpm = to_imx_tpm_pwm_chip(chip);
 	u32 rate, prescale, period_count, clock_unit;
@@ -126,7 +126,7 @@ static int pwm_imx_tpm_round_state(struct pwm_chip *chip,
 		real_state->duty_cycle = state->duty_cycle;
 
 	tmp = (u64)p->mod * real_state->duty_cycle;
-	p->val = DIV_ROUND_CLOSEST_ULL(tmp, real_state->period);
+	p->val = DIV64_U64_ROUND_CLOSEST(tmp, real_state->period);
 
 	real_state->polarity = state->polarity;
 	real_state->enabled = state->enabled;
@@ -289,7 +289,7 @@ static int pwm_imx_tpm_apply_hw(struct pwm_chip *chip,
 
 static int pwm_imx_tpm_apply(struct pwm_chip *chip,
 			     struct pwm_device *pwm,
-			     struct pwm_state *state)
+			     const struct pwm_state *state)
 {
 	struct imx_tpm_pwm_chip *tpm = to_imx_tpm_pwm_chip(chip);
 	struct imx_tpm_pwm_param param;

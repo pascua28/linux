@@ -18,6 +18,7 @@ struct pwm_export {
 	struct device child;
 	struct pwm_device *pwm;
 	struct mutex lock;
+	struct pwm_state suspend;
 };
 
 static struct pwm_export *child_to_pwm_export(struct device *child)
@@ -41,7 +42,7 @@ static ssize_t period_show(struct device *child,
 
 	pwm_get_state(pwm, &state);
 
-	return sprintf(buf, "%u\n", state.period);
+	return sprintf(buf, "%llu\n", state.period);
 }
 
 static ssize_t period_store(struct device *child,
@@ -51,10 +52,10 @@ static ssize_t period_store(struct device *child,
 	struct pwm_export *export = child_to_pwm_export(child);
 	struct pwm_device *pwm = export->pwm;
 	struct pwm_state state;
-	unsigned int val;
+	u64 val;
 	int ret;
 
-	ret = kstrtouint(buf, 0, &val);
+	ret = kstrtou64(buf, 0, &val);
 	if (ret)
 		return ret;
 
@@ -76,7 +77,7 @@ static ssize_t duty_cycle_show(struct device *child,
 
 	pwm_get_state(pwm, &state);
 
-	return sprintf(buf, "%u\n", state.duty_cycle);
+	return sprintf(buf, "%llu\n", state.duty_cycle);
 }
 
 static ssize_t duty_cycle_store(struct device *child,
@@ -211,7 +212,30 @@ static ssize_t capture_show(struct device *child,
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%u %u\n", result.period, result.duty_cycle);
+	return sprintf(buf, "%llu %llu\n", result.period, result.duty_cycle);
+}
+
+static ssize_t output_type_show(struct device *child,
+			     struct device_attribute *attr,
+			     char *buf)
+{
+	const struct pwm_device *pwm = child_to_pwm_device(child);
+	const char *output_type = "unknown";
+	struct pwm_state state;
+
+	pwm_get_state(pwm, &state);
+	switch (state.output_type) {
+	case PWM_OUTPUT_FIXED:
+		output_type = "fixed";
+		break;
+	case PWM_OUTPUT_MODULATED:
+		output_type = "modulated";
+		break;
+	default:
+		break;
+	}
+
+	return snprintf(buf, PAGE_SIZE, "%s\n", output_type);
 }
 
 static DEVICE_ATTR_RW(period);
@@ -219,6 +243,7 @@ static DEVICE_ATTR_RW(duty_cycle);
 static DEVICE_ATTR_RW(enable);
 static DEVICE_ATTR_RW(polarity);
 static DEVICE_ATTR_RO(capture);
+static DEVICE_ATTR_RO(output_type);
 
 static struct attribute *pwm_attrs[] = {
 	&dev_attr_period.attr,
@@ -226,6 +251,7 @@ static struct attribute *pwm_attrs[] = {
 	&dev_attr_enable.attr,
 	&dev_attr_polarity.attr,
 	&dev_attr_capture.attr,
+	&dev_attr_output_type.attr,
 	NULL
 };
 ATTRIBUTE_GROUPS(pwm);
@@ -372,10 +398,111 @@ static struct attribute *pwm_chip_attrs[] = {
 };
 ATTRIBUTE_GROUPS(pwm_chip);
 
+/* takes export->lock on success */
+static struct pwm_export *pwm_class_get_state(struct device *parent,
+					      struct pwm_device *pwm,
+					      struct pwm_state *state)
+{
+	struct device *child;
+	struct pwm_export *export;
+
+	if (!test_bit(PWMF_EXPORTED, &pwm->flags))
+		return NULL;
+
+	child = device_find_child(parent, pwm, pwm_unexport_match);
+	if (!child)
+		return NULL;
+
+	export = child_to_pwm_export(child);
+	put_device(child);	/* for device_find_child() */
+
+	mutex_lock(&export->lock);
+	pwm_get_state(pwm, state);
+
+	return export;
+}
+
+static int pwm_class_apply_state(struct pwm_export *export,
+				 struct pwm_device *pwm,
+				 struct pwm_state *state)
+{
+	int ret = pwm_apply_state(pwm, state);
+
+	/* release lock taken in pwm_class_get_state */
+	mutex_unlock(&export->lock);
+
+	return ret;
+}
+
+static int pwm_class_resume_npwm(struct device *parent, unsigned int npwm)
+{
+	struct pwm_chip *chip = dev_get_drvdata(parent);
+	unsigned int i;
+	int ret = 0;
+
+	for (i = 0; i < npwm; i++) {
+		struct pwm_device *pwm = &chip->pwms[i];
+		struct pwm_state state;
+		struct pwm_export *export;
+
+		export = pwm_class_get_state(parent, pwm, &state);
+		if (!export)
+			continue;
+
+		state.enabled = export->suspend.enabled;
+		ret = pwm_class_apply_state(export, pwm, &state);
+		if (ret < 0)
+			break;
+	}
+
+	return ret;
+}
+
+static int __maybe_unused pwm_class_suspend(struct device *parent)
+{
+	struct pwm_chip *chip = dev_get_drvdata(parent);
+	unsigned int i;
+	int ret = 0;
+
+	for (i = 0; i < chip->npwm; i++) {
+		struct pwm_device *pwm = &chip->pwms[i];
+		struct pwm_state state;
+		struct pwm_export *export;
+
+		export = pwm_class_get_state(parent, pwm, &state);
+		if (!export)
+			continue;
+
+		export->suspend = state;
+		state.enabled = false;
+		ret = pwm_class_apply_state(export, pwm, &state);
+		if (ret < 0) {
+			/*
+			 * roll back the PWM devices that were disabled by
+			 * this suspend function.
+			 */
+			pwm_class_resume_npwm(parent, i);
+			break;
+		}
+	}
+
+	return ret;
+}
+
+static int __maybe_unused pwm_class_resume(struct device *parent)
+{
+	struct pwm_chip *chip = dev_get_drvdata(parent);
+
+	return pwm_class_resume_npwm(parent, chip->npwm);
+}
+
+static SIMPLE_DEV_PM_OPS(pwm_class_pm_ops, pwm_class_suspend, pwm_class_resume);
+
 static struct class pwm_class = {
 	.name = "pwm",
 	.owner = THIS_MODULE,
 	.dev_groups = pwm_chip_groups,
+	.pm = &pwm_class_pm_ops,
 };
 
 static int pwmchip_sysfs_match(struct device *parent, const void *data)

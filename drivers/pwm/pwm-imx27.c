@@ -3,6 +3,10 @@
  * simple driver for PWM (Pulse Width Modulator) controller
  *
  * Derived from pxa PWM driver by eric miao <eric.miao@marvell.com>
+ *
+ * Limitations:
+ * - When disabled the output is driven to 0 independent of the configured
+ *   polarity.
  */
 
 #include <linux/bitfield.h>
@@ -194,7 +198,7 @@ static void pwm_imx27_wait_fifo_slot(struct pwm_chip *chip,
 	sr = readl(imx->mmio_base + MX3_PWMSR);
 	fifoav = FIELD_GET(MX3_PWMSR_FIFOAV, sr);
 	if (fifoav == MX3_PWMSR_FIFOAV_4WORDS) {
-		period_ms = DIV_ROUND_UP(pwm_get_period(pwm),
+		period_ms = DIV_ROUND_UP_ULL(pwm_get_period(pwm),
 					 NSEC_PER_MSEC);
 		msleep(period_ms);
 
@@ -205,7 +209,7 @@ static void pwm_imx27_wait_fifo_slot(struct pwm_chip *chip,
 }
 
 static int pwm_imx27_apply(struct pwm_chip *chip, struct pwm_device *pwm,
-			   struct pwm_state *state)
+			   const struct pwm_state *state)
 {
 	unsigned long period_cycles, duty_cycles, prescale;
 	struct pwm_imx27_chip *imx = to_pwm_imx27_chip(chip);
@@ -227,8 +231,7 @@ static int pwm_imx27_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 
 		period_cycles /= prescale;
 		c = (unsigned long long)period_cycles * state->duty_cycle;
-		do_div(c, state->period);
-		duty_cycles = c;
+		duty_cycles = div64_u64(c, state->period);
 
 		/*
 		 * according to imx pwm RM, the real period value should be

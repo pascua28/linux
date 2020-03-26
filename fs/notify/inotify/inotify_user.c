@@ -30,6 +30,7 @@
 #include <linux/poll.h>
 #include <linux/wait.h>
 #include <linux/memcontrol.h>
+#include <linux/security.h>
 
 #include "inotify.h"
 #include "../fdinfo.h"
@@ -45,8 +46,6 @@ struct kmem_cache *inotify_inode_mark_cachep __read_mostly;
 
 #include <linux/sysctl.h>
 
-static int zero;
-
 struct ctl_table inotify_table[] = {
 	{
 		.procname	= "max_user_instances",
@@ -54,7 +53,7 @@ struct ctl_table inotify_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &zero,
+		.extra1		= SYSCTL_ZERO,
 	},
 	{
 		.procname	= "max_user_watches",
@@ -62,7 +61,7 @@ struct ctl_table inotify_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &zero,
+		.extra1		= SYSCTL_ZERO,
 	},
 	{
 		.procname	= "max_queued_events",
@@ -70,7 +69,7 @@ struct ctl_table inotify_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &zero
+		.extra1		= SYSCTL_ZERO
 	},
 	{ }
 };
@@ -333,7 +332,8 @@ static const struct file_operations inotify_fops = {
 /*
  * find_inode - resolve a user-given path to a specific inode
  */
-static int inotify_find_inode(const char __user *dirname, struct path *path, unsigned flags)
+static int inotify_find_inode(const char __user *dirname, struct path *path,
+						unsigned int flags, __u64 mask)
 {
 	int error;
 
@@ -341,9 +341,16 @@ static int inotify_find_inode(const char __user *dirname, struct path *path, uns
 	if (error)
 		return error;
 	/* you can only watch an inode if you have read permissions on it */
-	error = inode_permission(path->dentry->d_inode, MAY_READ);
+	error = inode_permission2(path->mnt, path->dentry->d_inode, MAY_READ);
+	if (error) {
+		path_put(path);
+		return error;
+	}
+	error = security_path_notify(path, mask,
+				FSNOTIFY_OBJ_TYPE_INODE);
 	if (error)
 		path_put(path);
+
 	return error;
 }
 
@@ -694,6 +701,8 @@ SYSCALL_DEFINE3(inotify_add_watch, int, fd, const char __user *, pathname,
 	struct fsnotify_group *group;
 	struct inode *inode;
 	struct path path;
+	struct path alteredpath;
+	struct path *canonical_path = &path;
 	struct fd f;
 	int ret;
 	unsigned flags = 0;
@@ -735,17 +744,27 @@ SYSCALL_DEFINE3(inotify_add_watch, int, fd, const char __user *, pathname,
 	if (mask & IN_ONLYDIR)
 		flags |= LOOKUP_DIRECTORY;
 
-	ret = inotify_find_inode(pathname, &path, flags);
+	ret = inotify_find_inode(pathname, &path, flags,
+			(mask & IN_ALL_EVENTS));
 	if (ret)
 		goto fput_and_out;
 
+	/* support stacked filesystems */
+	if(path.dentry && path.dentry->d_op) {
+		if (path.dentry->d_op->d_canonical_path) {
+			path.dentry->d_op->d_canonical_path(&path, &alteredpath);
+			canonical_path = &alteredpath;
+			path_put(&path);
+		}
+	}
+
 	/* inode held in place by reference to path; group by fget on fd */
-	inode = path.dentry->d_inode;
+	inode = canonical_path->dentry->d_inode;
 	group = f.file->private_data;
 
 	/* create/update an inode mark */
 	ret = inotify_update_watch(group, inode, mask);
-	path_put(&path);
+	path_put(canonical_path);
 fput_and_out:
 	fdput(f);
 	return ret;

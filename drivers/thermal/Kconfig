@@ -310,7 +310,7 @@ config DOVE_THERMAL
 
 config DB8500_THERMAL
 	tristate "DB8500 thermal management"
-	depends on MFD_DB8500_PRCMU
+	depends on MFD_DB8500_PRCMU && OF
 	default y
 	help
 	  Adds DB8500 thermal management implementation according to the thermal
@@ -417,4 +417,11 @@ config UNIPHIER_THERMAL
 	  Enable this to plug in UniPhier on-chip PVT thermal driver into the
 	  thermal framework. The driver supports CPU thermal zone temperature
 	  reporting and a couple of trip points.
+
+config SPRD_THERMAL
+	tristate "Temperature sensor on Spreadtrum SoCs"
+	depends on ARCH_SPRD || COMPILE_TEST
+	help
+	  Support for the Spreadtrum thermal sensor driver in the Linux thermal
+	  framework.
 endif

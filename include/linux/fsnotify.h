@@ -189,6 +189,19 @@ static inline void fsnotify_link(struct inode *dir, struct inode *inode, struct 
 }
 
 /*
+ * fsnotify_unlink - 'name' was unlinked
+ *
+ * Caller must make sure that dentry->d_name is stable.
+ */
+static inline void fsnotify_unlink(struct inode *dir, struct dentry *dentry)
+{
+	/* Expected to be called before d_delete() */
+	WARN_ON_ONCE(d_is_negative(dentry));
+
+	fsnotify_dirent(dir, dentry, FS_DELETE);
+}
+
+/*
  * fsnotify_mkdir - directory 'name' was created
  */
 static inline void fsnotify_mkdir(struct inode *inode, struct dentry *dentry)
@@ -196,6 +209,19 @@ static inline void fsnotify_mkdir(struct inode *inode, struct dentry *dentry)
 	audit_inode_child(inode, dentry, AUDIT_TYPE_CHILD_CREATE);
 
 	fsnotify_dirent(inode, dentry, FS_CREATE | FS_ISDIR);
+}
+
+/*
+ * fsnotify_rmdir - directory 'name' was removed
+ *
+ * Caller must make sure that dentry->d_name is stable.
+ */
+static inline void fsnotify_rmdir(struct inode *dir, struct dentry *dentry)
+{
+	/* Expected to be called before d_delete() */
+	WARN_ON_ONCE(d_is_negative(dentry));
+
+	fsnotify_dirent(dir, dentry, FS_DELETE | FS_ISDIR);
 }
 
 /*
@@ -236,6 +262,7 @@ static inline void fsnotify_modify(struct file *file)
 static inline void fsnotify_open(struct file *file)
 {
 	const struct path *path = &file->f_path;
+	struct path lower_path;
 	struct inode *inode = file_inode(file);
 	__u32 mask = FS_OPEN;
 
@@ -244,6 +271,12 @@ static inline void fsnotify_open(struct file *file)
 	if (file->f_flags & __FMODE_EXEC)
 		mask |= FS_OPEN_EXEC;
 
+	if (path->dentry->d_op && path->dentry->d_op->d_canonical_path) {
+		path->dentry->d_op->d_canonical_path(path, &lower_path);
+		fsnotify_parent(&lower_path, NULL, mask);
+		fsnotify(lower_path.dentry->d_inode, mask, &lower_path, FSNOTIFY_EVENT_PATH, NULL, 0);
+		path_put(&lower_path);
+	}
 	fsnotify_path(inode, path, mask);
 }
 

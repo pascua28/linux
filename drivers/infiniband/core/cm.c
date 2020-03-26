@@ -1228,6 +1228,7 @@ struct ib_cm_id *ib_cm_insert_listen(struct ib_device *device,
 			/* Sharing an ib_cm_id with different handlers is not
 			 * supported */
 			spin_unlock_irqrestore(&cm.lock, flags);
+			ib_destroy_cm_id(cm_id);
 			return ERR_PTR(-EINVAL);
 		}
 		atomic_inc(&cm_id_priv->refcount);
@@ -4399,6 +4400,7 @@ error2:
 error1:
 	port_modify.set_port_cap_mask = 0;
 	port_modify.clr_port_cap_mask = IB_PORT_CM_SUP;
+	kfree(port);
 	while (--i) {
 		if (!rdma_cap_ib_cm(ib_device, i))
 			continue;
@@ -4407,6 +4409,7 @@ error1:
 		ib_modify_port(ib_device, port->port_num, 0, &port_modify);
 		ib_unregister_mad_agent(port->mad_agent);
 		cm_remove_port_fs(port);
+		kfree(port);
 	}
 free:
 	kfree(cm_dev);
@@ -4460,6 +4463,7 @@ static void cm_remove_one(struct ib_device *ib_device, void *client_data)
 		spin_unlock_irq(&cm.state_lock);
 		ib_unregister_mad_agent(cur_mad_agent);
 		cm_remove_port_fs(port);
+		kfree(port);
 	}
 
 	kfree(cm_dev);

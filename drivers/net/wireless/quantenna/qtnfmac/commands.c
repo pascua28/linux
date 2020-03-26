@@ -83,6 +83,7 @@ static int qtnf_cmd_send_with_reply(struct qtnf_bus *bus,
 	struct qlink_cmd *cmd;
 	struct qlink_resp *resp = NULL;
 	struct sk_buff *resp_skb = NULL;
+	int resp_res = 0;
 	u16 cmd_id;
 	u8 mac_id;
 	u8 vif_id;
@@ -113,6 +114,7 @@ static int qtnf_cmd_send_with_reply(struct qtnf_bus *bus,
 	}
 
 	resp = (struct qlink_resp *)resp_skb->data;
+	resp_res = le16_to_cpu(resp->result);
 	ret = qtnf_cmd_check_reply_header(resp, cmd_id, mac_id, vif_id,
 					  const_resp_size);
 	if (ret)
@@ -128,8 +130,8 @@ out:
 	else
 		consume_skb(resp_skb);
 
-	if (!ret && resp)
-		return qtnf_cmd_resp_result_decode(le16_to_cpu(resp->result));
+	if (!ret)
+		return qtnf_cmd_resp_result_decode(resp_res);
 
 	pr_warn("VIF%u.%u: cmd 0x%.4X failed: %d\n",
 		mac_id, vif_id, cmd_id, ret);
@@ -1011,9 +1013,8 @@ qtnf_parse_variable_mac_info(struct qtnf_wmac *mac,
 	if (WARN_ON(resp->n_reg_rules > NL80211_MAX_SUPP_REG_RULES))
 		return -E2BIG;
 
-	mac->rd = kzalloc(sizeof(*mac->rd) +
-			  sizeof(struct ieee80211_reg_rule) *
-			  resp->n_reg_rules, GFP_KERNEL);
+	mac->rd = kzalloc(struct_size(mac->rd, reg_rules, resp->n_reg_rules),
+			  GFP_KERNEL);
 	if (!mac->rd)
 		return -ENOMEM;
 

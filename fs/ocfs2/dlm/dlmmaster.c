@@ -25,9 +25,9 @@
 #include <linux/delay.h>
 
 
-#include "cluster/heartbeat.h"
-#include "cluster/nodemanager.h"
-#include "cluster/tcp.h"
+#include "../cluster/heartbeat.h"
+#include "../cluster/nodemanager.h"
+#include "../cluster/tcp.h"
 
 #include "dlmapi.h"
 #include "dlmcommon.h"
@@ -35,7 +35,7 @@
 #include "dlmdebug.h"
 
 #define MLOG_MASK_PREFIX (ML_DLM|ML_DLM_MASTER)
-#include "cluster/masklog.h"
+#include "../cluster/masklog.h"
 
 static void dlm_mle_node_down(struct dlm_ctxt *dlm,
 			      struct dlm_master_list_entry *mle,
@@ -2161,7 +2161,7 @@ put:
  * think that $RECOVERY is currently mastered by a dead node.  If so,
  * we wait a short time to allow that node to get notified by its own
  * heartbeat stack, then check again.  All $RECOVERY lock resources
- * mastered by dead nodes are purged when the hearbeat callback is
+ * mastered by dead nodes are purged when the heartbeat callback is
  * fired, so we can know for sure that it is safe to continue once
  * the node returns a live node or no node.  */
 static int dlm_pre_master_reco_lockres(struct dlm_ctxt *dlm,

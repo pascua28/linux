@@ -11,6 +11,7 @@
 #include <linux/mm.h>
 #include <linux/audit.h>
 #include <linux/numa.h>
+#include <linux/scs.h>
 
 #include <asm/pgtable.h>
 #include <linux/uaccess.h>
@@ -30,8 +31,6 @@ static struct signal_struct init_signals = {
 	.posix_timers = LIST_HEAD_INIT(init_signals.posix_timers),
 	.cputimer	= {
 		.cputime_atomic	= INIT_CPUTIME_ATOMIC,
-		.running	= false,
-		.checking_timer = false,
 	},
 #endif
 	INIT_CPU_TIMERS(init_signals)
@@ -72,7 +71,8 @@ struct task_struct init_task
 	.static_prio	= MAX_PRIO - 20,
 	.normal_prio	= MAX_PRIO - 20,
 	.policy		= SCHED_NORMAL,
-	.cpus_allowed	= CPU_MASK_ALL,
+	.cpus_ptr	= &init_task.cpus_mask,
+	.cpus_mask	= CPU_MASK_ALL,
 	.nr_cpus_allowed= NR_CPUS,
 	.mm		= NULL,
 	.active_mm	= &init_mm,
@@ -166,12 +166,14 @@ struct task_struct init_task
 	.softirqs_enabled = 1,
 #endif
 #ifdef CONFIG_LOCKDEP
+	.lockdep_depth = 0, /* no locks held yet */
+	.curr_chain_key = INITIAL_CHAIN_KEY,
 	.lockdep_recursion = 0,
 #endif
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
 	.ret_stack	= NULL,
 #endif
-#if defined(CONFIG_TRACING) && defined(CONFIG_PREEMPT)
+#if defined(CONFIG_TRACING) && defined(CONFIG_PREEMPTION)
 	.trace_recursion = 0,
 #endif
 #ifdef CONFIG_LIVEPATCH
@@ -182,6 +184,13 @@ struct task_struct init_task
 #endif
 };
 EXPORT_SYMBOL(init_task);
+
+#ifdef CONFIG_SHADOW_CALL_STACK
+unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)] __init_task_data
+		__aligned(SCS_SIZE) = {
+	[(SCS_SIZE / sizeof(long)) - 1] = SCS_END_MAGIC
+};
+#endif
 
 /*
  * Initial thread structure. Alignment of this is handled by a special

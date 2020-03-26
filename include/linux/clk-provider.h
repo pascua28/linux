@@ -9,8 +9,6 @@
 #include <linux/of.h>
 #include <linux/of_clk.h>
 
-#ifdef CONFIG_COMMON_CLK
-
 /*
  * flags used across common struct clk.  these flags should only affect the
  * top-level framework.  custom flags for dealing with hardware specifics
@@ -34,6 +32,7 @@
 #define CLK_OPS_PARENT_ENABLE	BIT(12)
 /* duty cycle call may be forwarded to the parent clock */
 #define CLK_DUTY_CYCLE_PARENT	BIT(13)
+#define CLK_DONT_HOLD_STATE	BIT(14) /* Don't hold state */
 
 struct clk;
 struct clk_hw;
@@ -201,6 +200,13 @@ struct clk_duty {
  *		directory is provided as an argument.  Called with
  *		prepare_lock held.  Returns 0 on success, -EERROR otherwise.
  *
+ * @pre_rate_change: Optional callback for a clock to fulfill its rate
+ *		change requirements before any rate change has occurred in
+ *		its clock tree. Returns 0 on success, -EERROR otherwise.
+ *
+ * @post_rate_change: Optional callback for a clock to clean up any
+ *		requirements that were needed while the clock and its tree
+ *		was changing states. Returns 0 on success, -EERROR otherwise.
  *
  * The clk_enable/clk_disable and clk_prepare/clk_unprepare pairs allow
  * implementations to split any work between atomic (enable) and sleepable
@@ -247,6 +253,12 @@ struct clk_ops {
 					  struct clk_duty *duty);
 	void		(*init)(struct clk_hw *hw);
 	void		(*debug_init)(struct clk_hw *hw, struct dentry *dentry);
+	int		(*pre_rate_change)(struct clk_hw *hw,
+					   unsigned long rate,
+					   unsigned long new_rate);
+	int		(*post_rate_change)(struct clk_hw *hw,
+					    unsigned long old_rate,
+					    unsigned long rate);
 };
 
 /**
@@ -301,7 +313,8 @@ struct clk_init_data {
  * into the clk API
  *
  * @init: pointer to struct clk_init_data that contains the init data shared
- * with the common clock framework.
+ * with the common clock framework. This pointer will be set to NULL once
+ * a clk_register() variant is called on this clk_hw pointer.
  */
 struct clk_hw {
 	struct clk_core *core;
@@ -803,15 +816,24 @@ void devm_clk_unregister(struct device *dev, struct clk *clk);
 
 void clk_hw_unregister(struct clk_hw *hw);
 void devm_clk_hw_unregister(struct device *dev, struct clk_hw *hw);
+void clk_sync_state(struct device *dev);
 
 /* helper functions */
 const char *__clk_get_name(const struct clk *clk);
 const char *clk_hw_get_name(const struct clk_hw *hw);
+#ifdef CONFIG_COMMON_CLK
 struct clk_hw *__clk_get_hw(struct clk *clk);
+#else
+static inline struct clk_hw *__clk_get_hw(struct clk *clk)
+{
+	return (struct clk_hw *)clk;
+}
+#endif
 unsigned int clk_hw_get_num_parents(const struct clk_hw *hw);
 struct clk_hw *clk_hw_get_parent(const struct clk_hw *hw);
 struct clk_hw *clk_hw_get_parent_by_index(const struct clk_hw *hw,
 					  unsigned int index);
+int clk_hw_set_parent(struct clk_hw *hw, struct clk_hw *new_parent);
 unsigned int __clk_get_enable_count(struct clk *clk);
 unsigned long clk_hw_get_rate(const struct clk_hw *hw);
 unsigned long __clk_get_flags(struct clk *clk);
@@ -867,8 +889,6 @@ static inline long divider_ro_round_rate(struct clk_hw *hw, unsigned long rate,
  */
 unsigned long clk_hw_round_rate(struct clk_hw *hw, unsigned long rate);
 
-struct of_device_id;
-
 struct clk_onecell_data {
 	struct clk **clks;
 	unsigned int clk_num;
@@ -878,8 +898,6 @@ struct clk_hw_onecell_data {
 	unsigned int num;
 	struct clk_hw *hws[];
 };
-
-extern struct of_device_id __clk_of_table;
 
 #define CLK_OF_DECLARE(name, compat, fn) OF_DECLARE_1(clk, name, compat, fn)
 
@@ -904,11 +922,63 @@ extern struct of_device_id __clk_of_table;
 		.ops		= _ops,				\
 	})
 
+#define CLK_HW_INIT_HW(_name, _parent, _ops, _flags)			\
+	(&(struct clk_init_data) {					\
+		.flags		= _flags,				\
+		.name		= _name,				\
+		.parent_hws	= (const struct clk_hw*[]) { _parent },	\
+		.num_parents	= 1,					\
+		.ops		= _ops,					\
+	})
+
+/*
+ * This macro is intended for drivers to be able to share the otherwise
+ * individual struct clk_hw[] compound literals created by the compiler
+ * when using CLK_HW_INIT_HW. It does NOT support multiple parents.
+ */
+#define CLK_HW_INIT_HWS(_name, _parent, _ops, _flags)			\
+	(&(struct clk_init_data) {					\
+		.flags		= _flags,				\
+		.name		= _name,				\
+		.parent_hws	= _parent,				\
+		.num_parents	= 1,					\
+		.ops		= _ops,					\
+	})
+
+#define CLK_HW_INIT_FW_NAME(_name, _parent, _ops, _flags)		\
+	(&(struct clk_init_data) {					\
+		.flags		= _flags,				\
+		.name		= _name,				\
+		.parent_data	= (const struct clk_parent_data[]) {	\
+					{ .fw_name = _parent },		\
+				  },					\
+		.num_parents	= 1,					\
+		.ops		= _ops,					\
+	})
+
 #define CLK_HW_INIT_PARENTS(_name, _parents, _ops, _flags)	\
 	(&(struct clk_init_data) {				\
 		.flags		= _flags,			\
 		.name		= _name,			\
 		.parent_names	= _parents,			\
+		.num_parents	= ARRAY_SIZE(_parents),		\
+		.ops		= _ops,				\
+	})
+
+#define CLK_HW_INIT_PARENTS_HW(_name, _parents, _ops, _flags)	\
+	(&(struct clk_init_data) {				\
+		.flags		= _flags,			\
+		.name		= _name,			\
+		.parent_hws	= _parents,			\
+		.num_parents	= ARRAY_SIZE(_parents),		\
+		.ops		= _ops,				\
+	})
+
+#define CLK_HW_INIT_PARENTS_DATA(_name, _parents, _ops, _flags)	\
+	(&(struct clk_init_data) {				\
+		.flags		= _flags,			\
+		.name		= _name,			\
+		.parent_data	= _parents,			\
 		.num_parents	= ARRAY_SIZE(_parents),		\
 		.ops		= _ops,				\
 	})
@@ -931,6 +1001,43 @@ extern struct of_device_id __clk_of_table;
 					      _parent,			\
 					      &clk_fixed_factor_ops,	\
 					      _flags),			\
+	}
+
+#define CLK_FIXED_FACTOR_HW(_struct, _name, _parent,			\
+			    _div, _mult, _flags)			\
+	struct clk_fixed_factor _struct = {				\
+		.div		= _div,					\
+		.mult		= _mult,				\
+		.hw.init	= CLK_HW_INIT_HW(_name,			\
+						 _parent,		\
+						 &clk_fixed_factor_ops,	\
+						 _flags),		\
+	}
+
+/*
+ * This macro allows the driver to reuse the _parent array for multiple
+ * fixed factor clk declarations.
+ */
+#define CLK_FIXED_FACTOR_HWS(_struct, _name, _parent,			\
+			     _div, _mult, _flags)			\
+	struct clk_fixed_factor _struct = {				\
+		.div		= _div,					\
+		.mult		= _mult,				\
+		.hw.init	= CLK_HW_INIT_HWS(_name,		\
+						  _parent,		\
+						  &clk_fixed_factor_ops, \
+						  _flags),	\
+	}
+
+#define CLK_FIXED_FACTOR_FW_NAME(_struct, _name, _parent,		\
+				 _div, _mult, _flags)			\
+	struct clk_fixed_factor _struct = {				\
+		.div		= _div,					\
+		.mult		= _mult,				\
+		.hw.init	= CLK_HW_INIT_FW_NAME(_name,		\
+						      _parent,		\
+						      &clk_fixed_factor_ops, \
+						      _flags),		\
 	}
 
 #ifdef CONFIG_OF
@@ -1019,5 +1126,4 @@ static inline int of_clk_detect_critical(struct device_node *np, int index,
 
 void clk_gate_restore_context(struct clk_hw *hw);
 
-#endif /* CONFIG_COMMON_CLK */
 #endif /* CLK_PROVIDER_H */

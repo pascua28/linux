@@ -17,12 +17,6 @@
 #include "sof-priv.h"
 #include "ops.h"
 
-/*
- * IPC message default size and timeout (ms).
- * TODO: allow platforms to set size and timeout.
- */
-#define IPC_TIMEOUT_MS		300
-
 static void ipc_trace_message(struct snd_sof_dev *sdev, u32 msg_id);
 static void ipc_stream_message(struct snd_sof_dev *sdev, u32 msg_cmd);
 
@@ -175,6 +169,15 @@ static void ipc_log_header(struct device *dev, u8 *text, u32 cmd)
 		break;
 	case SOF_IPC_GLB_TRACE_MSG:
 		str = "GLB_TRACE_MSG"; break;
+	case SOF_IPC_GLB_TEST_MSG:
+		str = "GLB_TEST_MSG";
+		switch (type) {
+		case SOF_IPC_TEST_IPC_FLOOD:
+			str2 = "IPC_FLOOD"; break;
+		default:
+			str2 = "unknown type"; break;
+		}
+		break;
 	default:
 		str = "unknown GLB command"; break;
 	}
@@ -187,7 +190,8 @@ static void ipc_log_header(struct device *dev, u8 *text, u32 cmd)
 #else
 static inline void ipc_log_header(struct device *dev, u8 *text, u32 cmd)
 {
-	dev_dbg(dev, "%s: 0x%x\n", text, cmd);
+	if ((cmd & SOF_GLB_TYPE_MASK) != SOF_IPC_GLB_TRACE_MSG)
+		dev_dbg(dev, "%s: 0x%x\n", text, cmd);
 }
 #endif
 
@@ -201,7 +205,7 @@ static int tx_wait_done(struct snd_sof_ipc *ipc, struct snd_sof_ipc_msg *msg,
 
 	/* wait for DSP IPC completion */
 	ret = wait_event_timeout(msg->waitq, msg->ipc_complete,
-				 msecs_to_jiffies(IPC_TIMEOUT_MS));
+				 msecs_to_jiffies(sdev->ipc_timeout));
 
 	if (ret == 0) {
 		dev_err(sdev->dev, "error: ipc timed out for 0x%x size %d\n",
@@ -344,19 +348,12 @@ void snd_sof_ipc_msgs_rx(struct snd_sof_dev *sdev)
 		break;
 	case SOF_IPC_FW_READY:
 		/* check for FW boot completion */
-		if (!sdev->boot_complete) {
+		if (sdev->fw_state == SOF_FW_BOOT_IN_PROGRESS) {
 			err = sof_ops(sdev)->fw_ready(sdev, cmd);
-			if (err < 0) {
-				/*
-				 * this indicates a mismatch in ABI
-				 * between the driver and fw
-				 */
-				dev_err(sdev->dev, "error: ABI mismatch %d\n",
-					err);
-			} else {
-				/* firmware boot completed OK */
-				sdev->boot_complete = true;
-			}
+			if (err < 0)
+				sdev->fw_state = SOF_FW_BOOT_READY_FAILED;
+			else
+				sdev->fw_state = SOF_FW_BOOT_COMPLETE;
 
 			/* wake up firmware loader */
 			wake_up(&sdev->boot_wait);
@@ -500,7 +497,7 @@ int snd_sof_ipc_stream_posn(struct snd_sof_dev *sdev,
 
 	/* send IPC to the DSP */
 	err = sof_ipc_tx_message(sdev->ipc,
-				 stream.hdr.cmd, &stream, sizeof(stream), &posn,
+				 stream.hdr.cmd, &stream, sizeof(stream), posn,
 				 sizeof(*posn));
 	if (err < 0) {
 		dev_err(sdev->dev, "error: failed to get stream %d position\n",
@@ -568,8 +565,10 @@ static int sof_set_get_large_ctrl_data(struct snd_sof_dev *sdev,
 	else
 		err = sof_get_ctrl_copy_params(cdata->type, partdata, cdata,
 					       sparams);
-	if (err < 0)
+	if (err < 0) {
+		kfree(partdata);
 		return err;
+	}
 
 	msg_bytes = sparams->msg_bytes;
 	pl_size = sparams->pl_size;
@@ -770,11 +769,11 @@ int snd_sof_ipc_valid(struct snd_sof_dev *sdev)
 			 " lock debug: %s\n"
 			 " lock vdebug: %s\n",
 			 v->build, v->date, v->time,
-			 ready->flags & SOF_IPC_INFO_GDB ?
+			 (ready->flags & SOF_IPC_INFO_GDB) ?
 				"enabled" : "disabled",
-			 ready->flags & SOF_IPC_INFO_LOCKS ?
+			 (ready->flags & SOF_IPC_INFO_LOCKS) ?
 				"enabled" : "disabled",
-			 ready->flags & SOF_IPC_INFO_LOCKSV ?
+			 (ready->flags & SOF_IPC_INFO_LOCKSV) ?
 				"enabled" : "disabled");
 	}
 
@@ -827,6 +826,9 @@ EXPORT_SYMBOL(snd_sof_ipc_init);
 void snd_sof_ipc_free(struct snd_sof_dev *sdev)
 {
 	struct snd_sof_ipc *ipc = sdev->ipc;
+
+	if (!ipc)
+		return;
 
 	/* disable sending of ipc's */
 	mutex_lock(&ipc->tx_mutex);

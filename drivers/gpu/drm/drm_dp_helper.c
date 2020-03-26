@@ -20,16 +20,18 @@
  * OF THIS SOFTWARE.
  */
 
+#include <linux/delay.h>
+#include <linux/errno.h>
+#include <linux/i2c.h>
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/delay.h>
-#include <linux/init.h>
-#include <linux/errno.h>
 #include <linux/sched.h>
-#include <linux/i2c.h>
 #include <linux/seq_file.h>
+
 #include <drm/drm_dp_helper.h>
-#include <drm/drmP.h>
+#include <drm/drm_print.h>
+#include <drm/drm_vblank.h>
 
 #include "drm_crtc_helper_internal.h"
 
@@ -150,38 +152,15 @@ EXPORT_SYMBOL(drm_dp_link_train_channel_eq_delay);
 
 u8 drm_dp_link_rate_to_bw_code(int link_rate)
 {
-	switch (link_rate) {
-	default:
-		WARN(1, "unknown DP link rate %d, using %x\n", link_rate,
-		     DP_LINK_BW_1_62);
-		/* fall through */
-	case 162000:
-		return DP_LINK_BW_1_62;
-	case 270000:
-		return DP_LINK_BW_2_7;
-	case 540000:
-		return DP_LINK_BW_5_4;
-	case 810000:
-		return DP_LINK_BW_8_1;
-	}
+	/* Spec says link_bw = link_rate / 0.27Gbps */
+	return link_rate / 27000;
 }
 EXPORT_SYMBOL(drm_dp_link_rate_to_bw_code);
 
 int drm_dp_bw_code_to_link_rate(u8 link_bw)
 {
-	switch (link_bw) {
-	default:
-		WARN(1, "unknown DP link BW code %x, using 162000\n", link_bw);
-		/* fall through */
-	case DP_LINK_BW_1_62:
-		return 162000;
-	case DP_LINK_BW_2_7:
-		return 270000;
-	case DP_LINK_BW_5_4:
-		return 540000;
-	case DP_LINK_BW_8_1:
-		return 810000;
-	}
+	/* Spec says link_rate = link_bw * 0.27Gbps */
+	return link_bw * 27000;
 }
 EXPORT_SYMBOL(drm_dp_bw_code_to_link_rate);
 
@@ -356,6 +335,65 @@ int drm_dp_dpcd_read_link_status(struct drm_dp_aux *aux,
 				DP_LINK_STATUS_SIZE);
 }
 EXPORT_SYMBOL(drm_dp_dpcd_read_link_status);
+
+/**
+ * drm_dp_send_real_edid_checksum() - send back real edid checksum value
+ * @aux: DisplayPort AUX channel
+ * @real_edid_checksum: real edid checksum for the last block
+ *
+ * Returns:
+ * True on success
+ */
+bool drm_dp_send_real_edid_checksum(struct drm_dp_aux *aux,
+				    u8 real_edid_checksum)
+{
+	u8 link_edid_read = 0, auto_test_req = 0, test_resp = 0;
+
+	if (drm_dp_dpcd_read(aux, DP_DEVICE_SERVICE_IRQ_VECTOR,
+			     &auto_test_req, 1) < 1) {
+		DRM_ERROR("DPCD failed read at register 0x%x\n",
+			  DP_DEVICE_SERVICE_IRQ_VECTOR);
+		return false;
+	}
+	auto_test_req &= DP_AUTOMATED_TEST_REQUEST;
+
+	if (drm_dp_dpcd_read(aux, DP_TEST_REQUEST, &link_edid_read, 1) < 1) {
+		DRM_ERROR("DPCD failed read at register 0x%x\n",
+			  DP_TEST_REQUEST);
+		return false;
+	}
+	link_edid_read &= DP_TEST_LINK_EDID_READ;
+
+	if (!auto_test_req || !link_edid_read) {
+		DRM_DEBUG_KMS("Source DUT does not support TEST_EDID_READ\n");
+		return false;
+	}
+
+	if (drm_dp_dpcd_write(aux, DP_DEVICE_SERVICE_IRQ_VECTOR,
+			      &auto_test_req, 1) < 1) {
+		DRM_ERROR("DPCD failed write at register 0x%x\n",
+			  DP_DEVICE_SERVICE_IRQ_VECTOR);
+		return false;
+	}
+
+	/* send back checksum for the last edid extension block data */
+	if (drm_dp_dpcd_write(aux, DP_TEST_EDID_CHECKSUM,
+			      &real_edid_checksum, 1) < 1) {
+		DRM_ERROR("DPCD failed write at register 0x%x\n",
+			  DP_TEST_EDID_CHECKSUM);
+		return false;
+	}
+
+	test_resp |= DP_TEST_EDID_CHECKSUM_WRITE;
+	if (drm_dp_dpcd_write(aux, DP_TEST_RESPONSE, &test_resp, 1) < 1) {
+		DRM_ERROR("DPCD failed write at register 0x%x\n",
+			  DP_TEST_RESPONSE);
+		return false;
+	}
+
+	return true;
+}
+EXPORT_SYMBOL(drm_dp_send_real_edid_checksum);
 
 /**
  * drm_dp_link_probe() - probe a DisplayPort link for capabilities
@@ -1278,7 +1316,9 @@ static const struct dpcd_quirk dpcd_quirk_list[] = {
 	/* LG LP140WF6-SPM1 eDP panel */
 	{ OUI(0x00, 0x22, 0xb9), DEVICE_ID('s', 'i', 'v', 'a', 'r', 'T'), false, BIT(DP_DPCD_QUIRK_CONSTANT_N) },
 	/* Apple panels need some additional handling to support PSR */
-	{ OUI(0x00, 0x10, 0xfa), DEVICE_ID_ANY, false, BIT(DP_DPCD_QUIRK_NO_PSR) }
+	{ OUI(0x00, 0x10, 0xfa), DEVICE_ID_ANY, false, BIT(DP_DPCD_QUIRK_NO_PSR) },
+	/* CH7511 seems to leave SINK_COUNT zeroed */
+	{ OUI(0x00, 0x00, 0x00), DEVICE_ID('C', 'H', '7', '5', '1', '1'), false, BIT(DP_DPCD_QUIRK_NO_SINK_COUNT) },
 };
 
 #undef OUI
